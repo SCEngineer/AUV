@@ -1,0 +1,203 @@
+{
+  "mission_info": {
+    "name": "arrowhead swim",
+    "description": "swim from the ALA office to Wayne's slip in Meadow Bay",
+    "version": "1.0",
+    "author": "Folsom"
+  },
+  "tasks": [
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "description": "Go To Surfaced Trim",
+      "timeout": 45.0
+    },
+    {
+      "type": "GPS_FIX",
+      "description": "Gps Fix",
+      "timeout": 20.0
+    },
+ 
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "description": "WP1",
+      "lat": 34.26002217306454,
+      "lon": -117.178329268574,
+      "speed": 2.0,
+      "depth": 0.0,
+      "timeout": 1200.0
+    },
+    {
+      "type": "GPS_FIX",
+      "description": "Gps Fix",
+      "timeout": 20.0
+    },
+    {
+      "type": "GO_TO_SUBMERGED_TRIM",
+      "description": "Go To Submerged Trim",
+      "timeout": 45.0
+    },
+    {
+      "type": "DIVE",
+      "description": "Dive",
+      "depth": 5.0,
+      "speed": 2.0,
+      "timeout": 180.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "description": "WP2",
+      "lat": 34.25490012883849,
+      "lon": -117.1874878615656,
+      "speed": 2.5,
+      "depth": 5.0,
+      "timeout": 1200.0
+    },
+    {
+      "type": "CLIMB",
+      "description": "Climb",
+      "target_depth": 3.0,
+      "speed": 2.0,
+      "timeout": 180.0
+    },
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "description": "Go To Surfaced Trim",
+      "timeout": 90.0
+    },
+    {
+      "type": "GPS_FIX",
+      "description": "Gps Fix",
+      "timeout": 15.0
+    },
+  
+    {
+      "type": "GO_TO_SUBMERGED_TRIM",
+      "description": "Go To Submerged Trim",
+      "timeout": 90.0
+    },
+    {
+      "type": "DIVE",
+      "description": "Dive",
+      "depth": 10.0,
+      "speed": 2.0,
+      "timeout": 180.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "description": "WP3",
+      "lat": 34.25488003420811,
+      "lon": -117.1933641952494,
+      "speed": 2.0,
+      "depth": 10.0,
+      "timeout": 1200.0
+    },
+    {
+      "type": "CLIMB",
+      "description": "Climb",
+      "depth": 3.0,
+      "speed": 2.0,
+      "timeout": 180.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "description": "WP4",
+      "lat": 34.25575195564407,
+      "lon": -117.1962791421688,
+      "speed": 3.0,
+      "depth": 3.0,
+      "timeout": 1200.0
+    },
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "description": "Go To Surfaced Trim",
+      "timeout": 45.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "description": "WP5",
+      "lat": 34.25630958769248,
+      "lon": -117.197375710066,
+      "speed": 1.5,
+      "depth": 0.0,
+      "timeout": 1200.0
+    },
+    {
+      "type": "GPS_FIX",
+      "description": "Gps Fix",
+      "timeout": 20.0
+    },
+  
+    {
+      "type": "GO_TO_SUBMERGED_TRIM",
+      "description": "Go To Submerged Trim",
+      "timeout": 45.0
+    },
+    {
+      "type": "DIVE",
+      "description": "Dive",
+      "depth": 4.0,
+      "speed": 1.5,
+      "timeout": 180.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "description": "WP6",
+      "lat": 34.25663412035237,
+      "lon": -117.1979824190871,
+      "speed": 1.5,
+      "depth": 3.0,
+      "timeout": 1200.0
+    },
+    {
+      "type": "CLIMB",
+      "description": "Climb",
+      "depth": 0.0,
+      "speed": 1.5,
+      "timeout": 90.0
+    },
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "description": "Go To Surfaced Trim",
+      "timeout": 45.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "description": "WP7",
+      "lat": 34.25716296128359,
+      "lon": -117.1982868830071,
+      "speed": 1.5,
+      "depth": 0.0,
+      "timeout": 1200.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "description": "WP8",
+      "lat": 34.25739953130836,
+      "lon": -117.1987647804768,
+      "speed": 1.0,
+      "depth": 0.0,
+      "timeout": 1200.0
+    },
+    {
+      "type": "MISSION_COMPLETE",
+      "description": "Mission Complete",
+      "timeout": 5.0
+    }
+  ],
+  "safety_limits": {
+    "max_depth": 20.0,
+    "min_voltage": 10.5,
+    "max_mission_time": 5000.0,
+    "max_nav_error": 75.0
+  },
+  "vehicle_config": {
+    "initial_position": {
+      "lat": 34.26279155720928,
+      "lon": -117.1685610858886,
+      "depth": 0.0,
+      "heading": 0.0
+    },
+    "battery_capacity": 12.0,
+    "ballast_capacity": 0.0707
+  }
+}

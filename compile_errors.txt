@@ -1,0 +1,4 @@
+  File "./obstacle_avoidance.py", line 382
+    time_since_reversal >= self.min_reversal_interval and
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: invalid syntax. Perhaps you forgot a comma?

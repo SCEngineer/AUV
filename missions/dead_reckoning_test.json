@@ -1,0 +1,81 @@
+{
+  "mission_info": {
+    "name": "dead reckoning test",
+    "description": "SIMPLR-AUV mission",
+    "author": "SIMPLR-AUV Team",
+    "created_date": "2025-09-14T17:45:55.742454",
+    "version": "2.0",
+    "total_tasks": 11,
+    "waypoint_count": 2,
+    "total_distance_meters": 400.0,
+    "estimated_duration_minutes": 8.8
+  },
+  "vehicle_config": {
+    "initial_position": {
+      "lat": 34.26279155720928,
+      "lon": -117.1685610858886,
+      "depth": 0.0,
+      "heading": 180.0
+    },
+    "battery_capacity": 12.0,
+    "ballast_capacity": 0.0707
+  },
+  "tasks": [
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "timeout": 30.0
+    },
+    {
+      "type": "GPS_FIX",
+      "timeout": 30.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "lat": 34.26279155720928,
+      "lon": -117.1707373973051,
+      "depth": 0.0,
+      "speed": 2.0,
+      "timeout": 400.0
+    },
+    {
+      "type": "GPS_FIX",
+      "timeout": 30.0
+    },
+    {
+      "type": "GO_TO_SUBMERGED_TRIM",
+      "timeout": 30.0
+    },
+    {
+      "type": "DIVE",
+      "target_depth": 10.0,
+      "speed": 2.0,
+      "timeout": 600.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "lat": 34.26279155720928,
+      "lon": -117.17291370872161,
+      "depth": 10.0,
+      "speed": 2.0,
+      "timeout": 400.0
+    },
+    {
+      "type": "CLIMB",
+      "target_depth": 0.0,
+      "speed": 2.0,
+      "timeout": 600.0
+    },
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "timeout": 30.0
+    },
+    {
+      "type": "GPS_FIX",
+      "timeout": 30.0
+    },
+    {
+      "type": "MISSION_COMPLETE",
+      "timeout": 5.0
+    }
+  ]
+}

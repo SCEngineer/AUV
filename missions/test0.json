@@ -1,0 +1,88 @@
+{
+  "mission_info": {
+    "name": "test0",
+    "description": "Initial test mission of the new refactored SIMPLR AUV system",
+    "version": "1.0",
+    "author": "folsom"
+  },
+  "tasks": [
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "description": "Initialize at surface trim",
+      "timeout": 60.0
+    },
+    {
+      "type": "GPS_FIX",
+      "description": "Get initial GPS fix",
+      "timeout": 10.0
+    },
+    {
+      "type": "TELEMETRY",
+      "description": "Send initial telemetry",
+      "timeout": 10.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "description": "Swim to waypoint 1 at surface",
+      "lat": 34.2592,
+      "lon": -117.1987,
+      "speed": 1.0,
+      "depth": 0.0,
+      "timeout": 600.0
+    },
+    {
+      "type": "GO_TO_SUBMERGED_TRIM",
+      "description": "Prepare for submerged operations",
+      "timeout": 90.0
+    },
+    {
+      "type": "DIVE",
+      "description": "Dive to 5m depth",
+      "depth": 5.0,
+      "speed": 1.0,
+      "timeout": 300.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "description": "Swim to waypoint 2 submerged",
+      "lat": 34.2574,
+      "lon": -117.2005,
+      "speed": 1.0,
+      "depth": 5.0,
+      "timeout": 600.0
+    },
+    {
+      "type": "CLIMB",
+      "description": "Climb to surface",
+      "depth": 0.0,
+      "speed": 1.0,
+      "timeout": 300.0
+    },
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "description": "Return to surface trim",
+      "timeout": 60.0
+    },
+    {
+      "type": "MISSION_COMPLETE",
+      "description": "Mission complete",
+      "timeout": 5.0
+    }
+  ],
+  "safety_limits": {
+    "max_depth": 15.0,
+    "min_voltage": 10.5,
+    "max_mission_time": 1500.0,
+    "max_nav_error": 50.0
+  },
+  "vehicle_config": {
+    "initial_position": {
+      "lat": 34.25739,
+      "lon": -117.19870,
+      "depth": 0.0,
+      "heading": 270.0
+    },
+    "battery_capacity": 12.0,
+    "ballast_capacity": 0.07
+  }
+}

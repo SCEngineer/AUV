@@ -1,0 +1,126 @@
+{
+  "mission_info": {
+    "name": "New Mission",
+    "description": "SIMPLR-AUV mission",
+    "author": "SIMPLR-AUV Team",
+    "created_date": "2025-09-17T13:24:01.980935",
+    "version": "2.0",
+    "total_tasks": 12,
+    "waypoint_count": 2,
+    "track_count": 1,
+    "total_distance_meters": 1300.0,
+    "estimated_duration_minutes": 10.8
+  },
+  "vehicle_config": {
+    "initial_position": {
+      "lat": 34.26279155720928,
+      "lon": -117.1685610858886,
+      "depth": 0.0,
+      "heading": 180.0
+    },
+    "battery_capacity": 12.0,
+    "ballast_capacity": 0.0707
+  },
+  "tasks": [
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "timeout": 30.0
+    },
+    {
+      "type": "GPS_FIX",
+      "timeout": 30.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "lat": 34.26279155720928,
+      "lon": -117.1707373973051,
+      "depth": 0.0,
+      "speed": 2.0,
+      "timeout": 400.0
+    },
+    {
+      "type": "GPS_FIX",
+      "timeout": 30.0
+    },
+    {
+      "type": "GO_TO_SUBMERGED_TRIM",
+      "timeout": 30.0
+    },
+    {
+      "type": "DIVE",
+      "depth": 10.0,
+      "speed": 2.0,
+      "timeout": 600.0
+    },
+    {
+      "type": "FOLLOW_TRACK",
+      "waypoints": [
+        {
+          "lat": 34.26189223560336,
+          "lon": -117.1707373973051,
+          "speed": 2.0,
+          "depth": 10.0
+        },
+        {
+          "lat": 34.26189223560336,
+          "lon": -117.1685610858886,
+          "speed": 2.0,
+          "depth": 10.0
+        },
+        {
+          "lat": 34.26099291399745,
+          "lon": -117.1685610858886,
+          "speed": 2.0,
+          "depth": 10.0
+        },
+        {
+          "lat": 34.26099291399745,
+          "lon": -117.1707373973051,
+          "speed": 2.0,
+          "depth": 10.0
+        },
+        {
+          "lat": 34.26009359239153,
+          "lon": -117.1707373973051,
+          "speed": 2.0,
+          "depth": 10.0
+        },
+        {
+          "lat": 34.26009359239153,
+          "lon": -117.1685610858886,
+          "speed": 2.0,
+          "depth": 10.0
+        }
+      ],
+      "lookahead_distance": 30.0,
+      "cross_track_tolerance": 10.0,
+      "timeout": 600.0
+    },
+    {
+      "type": "CLIMB",
+      "depth": 0.0,
+      "speed": 2.0,
+      "timeout": 600.0
+    },
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "timeout": 30.0
+    },
+    {
+      "type": "GPS_FIX",
+      "timeout": 30.0
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "lat": 34.26279155720928,
+      "lon": -117.1685610858886,
+      "depth": 0.0,
+      "speed": 2.0,
+      "timeout": 400.0
+    },
+    {
+      "type": "MISSION_COMPLETE",
+      "timeout": 5.0
+    }
+  ]
+}

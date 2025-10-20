@@ -1,0 +1,77 @@
+{
+  "mission_info": {
+    "name": "Integration Test Mission",
+    "description": "Test mission for system integration validation",
+    "estimated_duration_minutes": 15,
+    "total_distance_meters": 1000,
+    "version": "1.0"
+  },
+  "vehicle_config": {
+    "initial_position": {
+      "lat": 37.7749,
+      "lon": -122.4194,
+      "depth": 0.0
+    },
+    "vehicle_type": "SIMPLR_AUV",
+    "max_depth": 50.0,
+    "max_speed": 3.0
+  },
+  "tasks": [
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "description": "Prepare for mission start"
+    },
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "lat": 37.775,
+      "lon": -122.4195,
+      "depth": 10.0,
+      "speed": 2.0,
+      "description": "Swim to first waypoint"
+    },
+    {
+      "type": "FOLLOW_TRACK",
+      "description": "Follow predefined track",
+      "waypoints": [
+        {
+          "lat": 37.7751,
+          "lon": -122.4196,
+          "depth": 10.0,
+          "speed": 2.0
+        },
+        {
+          "lat": 37.7752,
+          "lon": -122.4197,
+          "depth": 15.0,
+          "speed": 2.0
+        },
+        {
+          "lat": 37.7753,
+          "lon": -122.4198,
+          "depth": 15.0,
+          "speed": 2.0
+        }
+      ]
+    },
+    {
+      "type": "DIVE",
+      "depth": 25.0,
+      "speed": 1.0,
+      "description": "Dive to survey depth"
+    },
+    {
+      "type": "CLIMB",
+      "depth": 5.0,
+      "speed": 1.0,
+      "description": "Return to shallow depth"
+    },
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "description": "Surface for mission completion"
+    },
+    {
+      "type": "MISSION_COMPLETE",
+      "description": "Mission completed successfully"
+    }
+  ]
+}

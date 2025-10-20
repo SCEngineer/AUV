@@ -1,0 +1,106 @@
+{
+  "mission_info": {
+    "name": "Initial Track Following Test",
+    "description": "Test mission to verify Track Following Guidance",
+    "version": "1.0",
+    "author": "Folsom"
+  },
+  "tasks": [
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "description": "Initialize at surface",
+      "timeout": 45.0
+    },
+    {
+      "type": "GPS_FIX",
+      "description": "Get initial position fix",
+      "timeout": 20.0
+    },
+ 
+    {
+      "type": "SWIM_TO_WAYPOINT",
+      "description": "Swim out 100m at surface",
+      "lat": 34.26188156,
+      "lon": -117.16856109,
+      "speed": 2.0,
+      "depth": 0.0,
+      "timeout": 400.0
+    },
+    {
+      "type": "GPS_FIX",
+      "description": "Position fix before dive",
+      "timeout": 15.0
+    },
+    {
+      "type": "GO_TO_SUBMERGED_TRIM",
+      "description": "Fill ballast for neutral buoyancy",
+      "timeout": 45.0
+    },
+    {
+      "type": "DIVE",
+      "description": "SLOW dive to 10m at 2 m/s",
+      "depth": 10.0,
+      "speed": 2.0,
+      "timeout": 600.0
+    },
+    {
+      "type": "FOLLOW_TRACK",
+      "waypoints": [
+        {
+          "lat": 34.26279155720928,
+          "lon": -117.16747293018034,
+          "speed": 2.0,
+          "depth": 10.0
+        },
+        {
+          "lat": 34.26279155720928,
+          "lon": -117.1685610858886,
+          "speed": 2.0,
+          "depth": 10.0
+        }
+      ],
+      "lookahead_distance": 30.0,
+      "cross_track_tolerance": 10.0,
+      "timeout": 600.0
+    },
+
+    {
+      "type": "CLIMB",
+      "description": "SLOW climb to surface at 2 m/s", 
+      "depth": 0.0,
+      "speed": 2.0,
+      "timeout": 600.0
+    },
+    {
+      "type": "GO_TO_SURFACED_TRIM",
+      "description": "Empty ballast for positive buoyancy",
+      "timeout": 45.0
+    },
+    {
+      "type": "GPS_FIX",
+      "description": "Final position fix",
+      "timeout": 20.0
+    },
+    {
+      "type": "MISSION_COMPLETE",
+      "description": "Test mission complete",
+      "timeout": 5.0
+    }
+  ],
+  "safety_limits": {
+    "max_depth": 40.0,
+    "min_voltage": 10.5,
+    "max_mission_time": 1800.0,
+    "max_nav_error": 100.0
+  },
+  "vehicle_config": {
+    "initial_position": {
+      "lat": 34.26279155720928,
+      "lon": -117.1685610858886,
+      "depth": 0.0,
+      "heading": 180.0
+    },
+    "battery_capacity": 12.0,
+    "ballast_capacity": 0.0707
+  }
+}

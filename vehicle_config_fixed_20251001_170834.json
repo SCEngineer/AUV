@@ -1,0 +1,53 @@
+{
+  "metadata": {
+    "generated_date": "2025-10-01T17:08:34.496422",
+    "generator": "vehicle_config_generator.py",
+    "version": "2.0_fixed_buoyancy",
+    "description": "FIXED: Realistic AUV parameters with correct buoyancy calculations"
+  },
+  "vehicle_parameters": {
+    "mass": 27.78,
+    "total_weight_lb": 61.2,
+    "length": 1.524,
+    "width": 0.2032,
+    "height": 0.3048,
+    "cg_from_nose": 0.76073,
+    "cg_height": 0.0,
+    "surfaced_buoyancy": 4.4660145,
+    "submerged_buoyancy": -0.0266,
+    "I_yy": 2.68838172,
+    "I_zz": 2.68838172,
+    "cb_above_cg": 0.0254,
+    "lead_weights": {
+      "count": 5,
+      "total_weight_lb": 20.5
+    },
+    "foam_blocks": {
+      "count": 6,
+      "total_volume_in3": 803
+    }
+  },
+  "control_parameters": {
+    "max_pitch_angle_deg": 15.0,
+    "max_pitch_rate_deg_per_s": 10.0,
+    "pitch_damping": 0.75,
+    "pitch_rate_damping": 0.85,
+    "vertical_damping": 0.85,
+    "yaw_damping": 0.8,
+    "min_control_speed_mps": 0.3,
+    "control_speed_ramp_mps": 0.7
+  },
+  "validation": {
+    "buoyancy_realistic": true,
+    "diving_realistic": true,
+    "mass_reasonable": true,
+    "cg_reasonable": true
+  },
+  "raw_calculations": {
+    "total_weight_lb": 61.2,
+    "cg_y_in": 29.95,
+    "cg_z_in": 0.0,
+    "surfaced_buoyancy_lb": 1.0,
+    "submerged_buoyancy_lb": -0.006
+  }
+}
