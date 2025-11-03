@@ -1,0 +1,34 @@
+{
+  "detection": {
+    "max_range": 100.0,
+    "activation_distance": 65.0,
+    "activation_confidence": 0.60
+  },
+  "behavior": {
+    "lateral_offset": 55.0,
+    "range_multiplier": 1.2,
+    "use_adaptive_radius": true,
+    "base_waypoint_radius": 5.0,
+    "max_waypoint_radius": 25.0,
+    "uncertainty_scale_factor": 0.5,
+    "cross_track_weight": 1.0
+  },
+  "depth": {
+    "enable_depth_avoidance": true,
+    "vertical_clearance_margin": 5.0,
+    "horizontal_clearance_margin": 10.0,
+    "min_operating_depth": 2.0,
+    "max_operating_depth": 50.0,
+    "depth_tolerance": 2.0
+  },
+  "speed": {
+    "avoidance_speed": 0.7,
+    "normal_speed": 1.0
+  },
+  "logging": {
+    "enabled": true,
+    "csv_output": true,
+    "log_directory": "logs",
+    "debug_output": true
+  }
+}

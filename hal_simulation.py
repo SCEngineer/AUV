@@ -3,10 +3,12 @@
 hal_simulation.py - Simulation Manager for SIMPLR AUV
 
 FIXED VERSION: Proper coordinate conversion for sonar simulation
-- Converts GPS lat/lon to local ENU (East-North-Up) coordinates
+- Converts OBSTACLE GPS lat/lon to local ENU (East-North-Up) coordinates
+- Vehicle local coordinates are handled by navigation.py (NOT here)
 - Enables realistic sonar obstacle detection as vehicle moves
 - Real hardware sonar doesn't need this (it measures range directly)
 - NEW: Ping1D-style sonar packet with confidence
+- FIXED: Converts obstacle lat/lon to local x/y coordinates when mission loads
 
 This version standardizes the forward sonar output to a minimal packet:
     vehicle_state.sensor_data['sonar'] = {
@@ -17,6 +19,11 @@ This version standardizes the forward sonar output to a minimal packet:
 
 It also forwards that packet to self.hal.obstacle_avoidance.update_sonar(...)
 if present, so your OA module can remain device-agnostic.
+
+ARCHITECTURE NOTE:
+- navigation.py: Calculates and maintains vehicle's local_x/local_y in nav_state
+- hal_simulation.py: Converts OBSTACLE positions from lat/lon to local_x/local_y
+- simulated_sonar.py: Uses local coordinates (meters) for ray-casting math
 
 Constructor signature matches EnhancedHAL expectations:
     SimulationManager(vehicle_state, config, hal_instance)
@@ -69,6 +76,10 @@ class SimulationManager:
         # Ballast sim bookkeeping
         self._last_ballast_log = 0.0
         self._last_ballast_cmd = "OFF"
+        
+        # Store mission origin for coordinate conversion
+        self._mission_origin_lat = None
+        self._mission_origin_lon = None
 
         # Initialize per mode
         if self.mode == "simulation":
@@ -130,16 +141,76 @@ class SimulationManager:
         """
         Load obstacles into the simulated sonar from mission JSON (if sonar active).
         Expects mission_json to have an 'obstacles' array of shapes.
+        
+        FIXED: Now converts obstacle lat/lon to local x/y coordinates before passing to sonar.
         """
         try:
             if self.simulated_sonar is None:
                 self._log("Simulation: Cannot load obstacles (sonar not initialized)")
                 return
+            
             obstacles = mission_json.get("obstacles", [])
-            self.simulated_sonar.load_obstacles(obstacles)
-            self._log(f"Simulation: Loaded {len(obstacles)} obstacle(s) into sonar")
+            
+            if not obstacles:
+                self._log("Simulation: No obstacles in mission")
+                self.simulated_sonar.load_obstacles([])
+                return
+            
+            # Get mission origin from vehicle_config.initial_position
+            vehicle_config = mission_json.get("vehicle_config", {})
+            initial_pos = vehicle_config.get("initial_position", {})
+            origin_lat = initial_pos.get("lat")
+            origin_lon = initial_pos.get("lon")
+            
+            if origin_lat is None or origin_lon is None:
+                self._log("Simulation: WARNING - No initial position in mission, cannot convert obstacle coordinates")
+                self._log("Simulation: Obstacles will default to (0, 0) which may cause detection issues")
+                self.simulated_sonar.load_obstacles(obstacles)
+                return
+            
+            # Store origin for later use
+            self._mission_origin_lat = origin_lat
+            self._mission_origin_lon = origin_lon
+            
+            self._log(f"Simulation: Mission origin set to ({origin_lat:.6f}, {origin_lon:.6f})")
+            
+            # Convert each obstacle's lat/lon to local x/y
+            converted_obstacles = []
+            for i, obstacle in enumerate(obstacles):
+                # Make a copy so we don't modify the original
+                obs_copy = obstacle.copy()
+                
+                # Get obstacle position
+                position = obs_copy.get("position", {})
+                obs_lat = position.get("lat")
+                obs_lon = position.get("lon")
+                
+                if obs_lat is not None and obs_lon is not None:
+                    # Convert to local ENU coordinates
+                    local_x, local_y = self._latlon_to_local_enu(
+                        obs_lat, obs_lon, origin_lat, origin_lon
+                    )
+                    
+                    # Add local coordinates to position dict
+                    position["local_x"] = local_x
+                    position["local_y"] = local_y
+                    obs_copy["position"] = position
+                    
+                    obs_name = obs_copy.get("name", f"Obstacle {i+1}")
+                    self._log(f"Simulation: Converted {obs_name}: "
+                             f"({obs_lat:.6f}, {obs_lon:.6f}) → ({local_x:.1f}m, {local_y:.1f}m)")
+                else:
+                    self._log(f"Simulation: WARNING - Obstacle {i+1} missing lat/lon, defaulting to (0, 0)")
+                
+                converted_obstacles.append(obs_copy)
+            
+            # Load converted obstacles into sonar
+            self.simulated_sonar.load_obstacles(converted_obstacles)
+            self._log(f"Simulation: Loaded {len(converted_obstacles)} obstacle(s) into sonar with local coordinates")
+            
         except Exception as e:
             self._log(f"Simulation: Error loading obstacles: {e}")
+            traceback.print_exc()
 
     def update_systems(self, timestep: float = 0.1):
         """Main entry point called by HAL each tick."""
@@ -186,32 +257,28 @@ class SimulationManager:
         # 5) Forward sonar packet to OA if available
         try:
             sonar_pkt = self.vehicle_state.sensor_data.get("sonar")
-            if sonar_pkt and hasattr(self.hal, "obstacle_avoidance") and self.hal.obstacle_avoidance:
-                self.hal.obstacle_avoidance.update_sonar(sonar_pkt)
+            if sonar_pkt and hasattr(self.hal, "obstacle_avoidance"):
+                oa = self.hal.obstacle_avoidance
+                if oa and hasattr(oa, "update_sonar") and callable(oa.update_sonar):
+                    oa.update_sonar(sonar_pkt)
         except Exception as e:
-            self._log(f"Simulation: OA sonar forward error: {e}")
-            traceback.print_exc()
+            self._log(f"Simulation: OA forward error: {e}")
 
     def _update_simulated_sonar(self):
-        """
-        FIXED: Compute/update the Ping1D-style sonar packet with confidence.
-        
-        Converts GPS lat/lon to local ENU (East-North-Up) coordinates for ray-casting.
-        Real hardware sonar doesn't need this - it measures range directly.
-        """
+        """Update simulated sonar with vehicle position and heading, output Ping1D-style packet."""
         try:
             nav = self.vehicle_state.nav_state
             
-            # Get initial position as local coordinate origin
-            init_pos = self.vehicle_state.get_initial_position()
+            # Get vehicle position from navigation system (navigation.py calculates these)
+            # DO NOT calculate local_x/local_y here - that's the navigation system's job
+            vehicle_x = nav.get("local_x", 0.0)
+            vehicle_y = nav.get("local_y", 0.0)
             
-            # Convert current GPS lat/lon to local ENU coordinates (meters)
-            vehicle_x, vehicle_y = self._latlon_to_local_enu(
-                nav.get("lat", 0.0),
-                nav.get("lon", 0.0),
-                init_pos['lat'],
-                init_pos['lon']
-            )
+            # DEBUG: Check if we have valid local coordinates
+            if vehicle_x == 0.0 and vehicle_y == 0.0:
+                # Check if this is actually at origin or if navigation hasn't updated yet
+                if 'local_x' not in nav or 'local_y' not in nav:
+                    self._log("WARNING: local_x/local_y not in nav_state - navigation may not be running")
             
             vehicle_pos = {
                 "x": vehicle_x,
@@ -220,13 +287,13 @@ class SimulationManager:
             }
             heading = nav.get("heading", 0.0)
 
-            distance, info = self.simulated_sonar.get_distance_with_info(vehicle_pos, heading)
+            distance, confidence = self.simulated_sonar.get_distance_with_info(vehicle_pos, heading)
             timestamp = time.time()
 
             # Construct Ping1D-style sonar packet
             sonar_pkt = {
                 "range": distance,
-                "confidence": info.get("confidence", 0.0),
+                "confidence": confidence,
                 "timestamp": timestamp
             }
 
@@ -237,10 +304,12 @@ class SimulationManager:
             # Backward compatibility
             self.vehicle_state.sensor_data["sonar_distance"] = distance
 
-            # Debug output when confidence is high
+            # Debug output when confidence is high OR when at origin
             if sonar_pkt["confidence"] > 50.0:
                 print(f"[SONAR] range={distance:.1f}m conf={sonar_pkt['confidence']:.1f}% | "
                       f"Vehicle ENU: ({vehicle_x:.1f}, {vehicle_y:.1f}) | Heading: {heading:.1f}°")
+            elif vehicle_x == 0.0 and vehicle_y == 0.0:
+                print(f"[SONAR DEBUG] Vehicle at origin (0, 0), range={distance:.1f}m, conf={sonar_pkt['confidence']:.1f}%")
         except Exception as e:
             self._log(f"Simulation: Sonar update error: {e}")
             traceback.print_exc()

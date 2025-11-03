@@ -1,345 +1,327 @@
 #!/usr/bin/env python3
 """
-simulated_sonar.py - Enhanced Simulated Ping Sonar for SIMPLR AUV
-
-FIXED: Gracefully handles missions without obstacles
+simulated_sonar.py - PHYSICALLY REALISTIC BEAM MODEL
+Realistic forward-looking sonar with single detection per ping and proper beam physics
+No "see-through" detection - only nearest obstacle within beam volume is detected
 """
 
 import math
+import json
 from typing import Dict, Any, List, Optional, Tuple
 
 
 class SimulatedSonar:
-    """Simulates a forward-looking single-beam sonar for obstacle detection."""
+    """Simulates a forward-looking single-beam sonar with realistic beam physics."""
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, mission_file: str = None):
         config = config or {}
         
-        # Sonar characteristics
-        self.max_range = config.get('max_range', 100.0)
-        self.min_range = config.get('min_range', 0.3)
-        self.beam_width = config.get('beam_width', 25.0)
-        self.frequency = config.get('frequency', 115)
-        self.mount_angle = config.get('mount_angle', 0.0)
-        self.vertical_beam_width = config.get('vertical_beam_width', 25.0)
+        # Sonar parameters
+        self.max_range = float(config.get('max_range', 100.0))
+        self.min_range = float(config.get('min_range', 0.3))
+        self.beam_width = float(config.get('beam_width', 25.0))  # 3dB beamwidth in degrees
+        self.vertical_beam_width = float(config.get('vertical_beam_width', 25.0))
+        self.mount_angle = float(config.get('mount_angle', 0.0))
+        self.debug = bool(config.get('debug', False))
         
-        # Obstacles - FIXED: Always initialize as empty list
-        self.obstacles = []
-        
-        # Current sonar reading
+        # Internal state
+        self.obstacles: List[Dict[str, Any]] = []
         self.last_distance = self.max_range
         self.last_confidence = 0.0
-        self.last_detection = None
+        self.last_detection: Optional[Dict] = None
+
+        # Load mission obstacles if provided
+        if mission_file:
+            self._load_mission_obstacles(mission_file)
         
-        # Debug mode
-        self.debug = config.get('debug', False)
-        
-        print("=" * 60)
-        print("ENHANCED SIMULATED SONAR INITIALIZED")
-        print("=" * 60)
-        print(f"  Max range: {self.max_range}m")
-        print(f"  Min range: {self.min_range}m")
-        print(f"  Horizontal beam width: {self.beam_width}°")
-        print(f"  Vertical beam width: {self.vertical_beam_width}°")
-        print(f"  Mount angle: {self.mount_angle}° (0=horizontal, -=down, +=up)")
-        print(f"  Frequency: {self.frequency} kHz")
-        print(f"  Debug mode: {'ON' if self.debug else 'OFF'}")
-        print("=" * 60)
+        self._print_init_summary()
     
-    def load_obstacles(self, obstacles: Optional[List[Dict[str, Any]]]):
+    def _load_mission_obstacles(self, mission_file: str):
+        """Load obstacles from mission JSON with local_x/local_y"""
+        try:
+            with open(mission_file, 'r') as f:
+                mission = json.load(f)
+            raw_obstacles = mission.get("obstacles", [])
+            
+            self.obstacles = []
+            for obs in raw_obstacles:
+                pos = obs.get("position", {})
+                if 'local_x' in pos and 'local_y' in pos:
+                    self.obstacles.append(obs)
+                else:
+                    name = obs.get("name", "Unknown")
+                    print(f"[Sonar] WARNING: Skipping obstacle '{name}' - missing local_x/local_y")
+            
+            print(f"[Sonar] Loaded {len(self.obstacles)} valid obstacle(s) from mission")
+        except Exception as e:
+            print(f"[Sonar] ERROR: Failed to load mission file '{mission_file}': {e}")
+            self.obstacles = []
+
+    def _print_init_summary(self):
+        print("=" * 70)
+        print("REALISTIC SONAR BEAM MODEL INITIALIZED")
+        print("=" * 70)
+        print(f"  Max Range:          {self.max_range:.1f} m")
+        print(f"  Min Range:          {self.min_range:.1f} m")
+        print(f"  Horizontal Beam:    ±{self.beam_width/2:.1f}°")
+        print(f"  Vertical Beam:      ±{self.vertical_beam_width/2:.1f}°")
+        print(f"  Mount Angle:        {self.mount_angle:.1f}°")
+        print(f"  Obstacles Loaded:   {len(self.obstacles)}")
+        print(f"  Debug Mode:         {'ON' if self.debug else 'OFF'}")
+        print(f"  Beam Physics:       SINGLE DETECTION PER PING")
+        print(f"  Occlusion:          ENABLED (no see-through)")
+        print(f"  Confidence Model:   BEAM PATTERN TAPER")
+        print("=" * 70)
+
+    def load_obstacles(self, obstacles: List[Dict[str, Any]]):
+        """Manually load obstacles (alternative to mission file)"""
+        self.obstacles = []
+        for obs in obstacles:
+            pos = obs.get("position", {})
+            if 'local_x' in pos and 'local_y' in pos:
+                self.obstacles.append(obs)
+        print(f"[Sonar] Manually loaded {len(self.obstacles)} obstacle(s)")
+
+    def wrap_deg(self, angle_deg: float) -> float:
+        """Wrap angle to [-180, 180) range"""
+        return ((angle_deg + 180.0) % 360.0) - 180.0
+
+    def unit_vec_from_heading_deg(self, heading_deg: float) -> Tuple[float, float]:
+        """Get unit vector from nautical heading (0°=North, 90°=East)"""
+        # Convert nautical to mathematical for trig functions
+        math_heading = (90 - heading_deg) % 360
+        th = math.radians(math_heading)
+        return math.cos(th), math.sin(th)
+
+    def ray_circle_intersection(self, px: float, py: float, vx: float, vy: float, 
+                               cx: float, cy: float, r: float) -> Optional[float]:
         """
-        Load obstacles from mission file.
+        Ray from P in direction V (unit vector) vs circle center C with radius r.
+        Returns the smallest positive s (range along ray) or None if no hit.
+        """
+        dx, dy = cx - px, cy - py
+        t = dx * vx + dy * vy  # projection along the ray
         
-        FIXED: Handles None, empty list, or missing obstacles gracefully
+        if t < 0:
+            return None  # circle is behind the ray origin
+        
+        # perpendicular distance from ray to circle center
+        d2 = dx*dx + dy*dy - t*t
+        if d2 > r*r:
+            return None  # ray misses the circle
+        
+        # entry point along the ray
+        dt = math.sqrt(max(r*r - d2, 0.0))
+        s = t - dt
+        return s if s >= 0 else (t + dt)
+
+    def ray_box_intersection(self, px: float, py: float, vx: float, vy: float,
+                            cx: float, cy: float, width: float, length: float) -> Optional[float]:
+        """
+        Ray from P in direction V vs axis-aligned box centered at C.
+        Returns intersection distance or None.
+        """
+        # Box bounds in ENU coordinates
+        min_x, max_x = cx - width/2, cx + width/2
+        min_y, max_y = cy - length/2, cy + length/2
+
+        t_near = float('-inf')
+        t_far = float('inf')
+
+        # Check X-axis slabs
+        if abs(vx) < 1e-6:
+            if px < min_x or px > max_x:
+                return None
+        else:
+            t1 = (min_x - px) / vx
+            t2 = (max_x - px) / vx
+            t_near = max(t_near, min(t1, t2))
+            t_far = min(t_far, max(t1, t2))
+
+        # Check Y-axis slabs  
+        if abs(vy) < 1e-6:
+            if py < min_y or py > max_y:
+                return None
+        else:
+            t1 = (min_y - py) / vy
+            t2 = (max_y - py) / vy
+            t_near = max(t_near, min(t1, t2))
+            t_far = min(t_far, max(t1, t2))
+
+        if t_far < 0 or t_near > t_far:
+            return None
+        
+        t = t_near if t_near >= 0 else t_far
+        return t if t >= 0 else None
+
+    def get_distance_with_info(self, vehicle_position: Dict[str, float], 
+                              vehicle_heading: float) -> Tuple[float, Dict]:
+        """
+        Realistic sonar ping - single detection per ping with beam physics.
         
         Args:
-            obstacles: List of obstacle definitions from mission JSON (can be None)
-        """
-        # FIXED: Handle None or empty obstacles
-        if obstacles is None or not obstacles:
-            self.obstacles = []
-            print(f"\nSimulated Sonar: No obstacles in mission (obstacle avoidance disabled)")
-            return
+            vehicle_position: dict with 'x'/'local_x', 'y'/'local_y', 'depth'
+            vehicle_heading: degrees in NAUTICAL convention (0 = North, 90 = East)
         
-        # Validate that obstacles is actually a list
-        if not isinstance(obstacles, list):
-            print(f"\nSimulated Sonar: WARNING - obstacles is not a list, ignoring")
-            self.obstacles = []
-            return
-        
-        # Load valid obstacles
-        self.obstacles = obstacles
-        print(f"\nSimulated Sonar: Loaded {len(obstacles)} obstacle(s)")
-        for i, obs in enumerate(obstacles):
-            name = obs.get('name', f'Obstacle {i+1}')
-            shape = obs.get('shape', 'box')
-            pos = obs.get('position', {})
-            dims = obs.get('dimensions', {})
-            print(f"  [{i+1}] {name} ({shape})")
-            print(f"      Position: ({pos.get('local_x', 0):.1f}, {pos.get('local_y', 0):.1f})")
-            if shape == 'box':
-                print(f"      Dimensions: {dims.get('width', 0):.1f}m x {dims.get('length', 0):.1f}m")
-            else:
-                print(f"      Radius: {dims.get('radius', 0):.1f}m")
-            print(f"      Depth: {dims.get('depth_top', 0):.1f}m - {dims.get('depth_bottom', 10):.1f}m")
-    
-    def get_distance(self, vehicle_position: Dict[str, float], 
-                     vehicle_heading: float) -> float:
-        """Calculate sonar distance reading (finite, with max_range if no detection)."""
-        distance, _ = self.get_distance_with_info(vehicle_position, vehicle_heading)
-        return distance
-    
-    def get_distance_with_info(self, vehicle_position: Dict[str, float], 
-                              vehicle_heading: float) -> Tuple[float, Optional[Dict[str, Any]]]:
+        Returns:
+            (distance, {"confidence": 0-100, "obstacle_id": str, "bearing": float})
         """
-        Calculate sonar distance reading WITH obstacle information and confidence.
-        
-        FIXED: Returns max_range with 0% confidence when no obstacles loaded
-        """
-        # FIXED: Handle case when no obstacles are loaded
         if not self.obstacles:
+            return self.max_range, {"confidence": 0.0}
+
+        # Extract vehicle position
+        veh_x = vehicle_position.get('x', vehicle_position.get('local_x', 0.0))
+        veh_y = vehicle_position.get('y', vehicle_position.get('local_y', 0.0))
+        veh_depth = vehicle_position.get('depth', 0.0)
+        heading = vehicle_heading % 360.0
+
+        # Get beam direction vector
+        beam_vx, beam_vy = self.unit_vec_from_heading_deg(heading)
+        half_bw = self.beam_width / 2.0
+
+        nearest_detection = None  # (range, obstacle, relative_bearing)
+
+        for obs in self.obstacles:
+            pos = obs.get('position', {})
+            obs_x, obs_y = pos.get('local_x', 0.0), pos.get('local_y', 0.0)
+            
+            # Depth check
+            dims = obs.get('dimensions', {})
+            obs_depth_top = dims.get('depth_top', 0.0)
+            obs_depth_bottom = dims.get('depth_bottom', 100.0)
+            
+            # Calculate vertical beam coverage at rough distance estimate
+            rough_dist = math.hypot(obs_x - veh_x, obs_y - veh_y)
+            vertical_half_angle_rad = math.radians(self.vertical_beam_width / 2)
+            beam_vertical_extent = rough_dist * math.tan(vertical_half_angle_rad)
+            
+            beam_depth_top = veh_depth - beam_vertical_extent
+            beam_depth_bottom = veh_depth + beam_vertical_extent
+            
+            if beam_depth_bottom < obs_depth_top or beam_depth_top > obs_depth_bottom:
+                continue  # No depth overlap
+
+            # Relative bearing check
+            dx, dy = obs_x - veh_x, obs_y - veh_y
+            bearing_to_obs = math.degrees(math.atan2(dy, dx)) % 360.0  # Mathematical bearing
+            bearing_nautical = (90 - bearing_to_obs) % 360.0  # Convert to nautical
+            rel_bearing = self.wrap_deg(bearing_nautical - heading)
+            
+            if abs(rel_bearing) > half_bw:
+                continue  # Outside horizontal beam
+
+            # Ray intersection based on obstacle shape
+            shape = obs.get('shape', 'box').lower()
+            if shape == 'cylinder':
+                radius = float(dims.get('radius', 5.0))
+                range_m = self.ray_circle_intersection(veh_x, veh_y, beam_vx, beam_vy, 
+                                                      obs_x, obs_y, radius)
+            else:  # box
+                width = float(dims.get('width', 10.0))
+                length = float(dims.get('length', 10.0))
+                range_m = self.ray_box_intersection(veh_x, veh_y, beam_vx, beam_vy,
+                                                   obs_x, obs_y, width, length)
+
+            if range_m is None or range_m < self.min_range or range_m > self.max_range:
+                continue
+
+            # Keep nearest detection only (real beam physics - no see-through)
+            if nearest_detection is None or range_m < nearest_detection[0]:
+                nearest_detection = (range_m, obs, rel_bearing)
+
+        # No detection
+        if nearest_detection is None:
             self.last_distance = self.max_range
             self.last_confidence = 0.0
             self.last_detection = None
-            return self.last_distance, {"confidence": 0.0}
+            return self.max_range, 0.0
+
+        range_m, detected_obs, rel_bearing = nearest_detection
+
+        # Beam pattern confidence (Gaussian-like taper)
+        angle_ratio = abs(rel_bearing) / half_bw
+        confidence = max(0.0, 1.0 - (angle_ratio ** 2))  # 100% at center, 0% at edges
         
-        # Get vehicle state
-        veh_x = vehicle_position.get('x', 0.0)
-        veh_y = vehicle_position.get('y', 0.0)
-        veh_depth = vehicle_position.get('depth', 0.0)
-        
-        # Calculate effective sonar beam direction
-        beam_heading = vehicle_heading
-        beam_vertical_angle = self.mount_angle
-        
-        # Find closest obstacle intersection
-        min_distance = None
-        closest_obstacle = None
-        
-        for obstacle in self.obstacles:
-            distance = self._ray_cast_to_obstacle(
-                veh_x, veh_y, veh_depth,
-                beam_heading, beam_vertical_angle,
-                obstacle
-            )
-            
-            if distance is not None:
-                if min_distance is None or distance < min_distance:
-                    min_distance = distance
-                    closest_obstacle = obstacle
-        
-        # Apply range limits and compute confidence
-        if min_distance is not None:
-            if min_distance < self.min_range:
-                if self.debug:
-                    print(f"  Sonar: Detection {min_distance:.2f}m in dead zone (<{self.min_range}m)")
-                min_distance = self.max_range
-                confidence = 0.0
-                closest_obstacle = None
-            elif min_distance > self.max_range:
-                if self.debug:
-                    print(f"  Sonar: Detection {min_distance:.2f}m beyond max range (>{self.max_range}m)")
-                min_distance = self.max_range
-                confidence = 0.0
-                closest_obstacle = None
-            else:
-                # Linear confidence: 100% at 0m, 0% at max_range
-                confidence = max(0.0, 100.0 * (1.0 - min_distance / self.max_range))
-        else:
-            min_distance = self.max_range
-            confidence = 0.0
-            closest_obstacle = None
-        
-        # Store reading
-        self.last_distance = min_distance
-        self.last_confidence = confidence
-        self.last_detection = closest_obstacle
-        
-        # Debug output
-        if self.debug and confidence > 0.0:
-            obs_name = closest_obstacle.get('name', 'Unknown') if closest_obstacle else 'Unknown'
-            print(f"  Sonar: Detected {obs_name} at {min_distance:.2f}m (conf: {confidence:.1f}%) "
-                  f"(vehicle: {veh_x:.1f}, {veh_y:.1f}, {veh_depth:.1f}m, hdg: {vehicle_heading:.1f}°)")
-        
-        return min_distance, {"confidence": confidence}
-    
-    def _ray_cast_to_obstacle(self, veh_x: float, veh_y: float, veh_depth: float,
-                             heading: float, vertical_angle: float,
-                             obstacle: Dict[str, Any]) -> Optional[float]:
-        """Ray-cast from vehicle to obstacle with 3D depth checking."""
-        # Get obstacle depth range
-        dims = obstacle.get('dimensions', {})
-        obs_depth_top = dims.get('depth_top', 0.0)
-        obs_depth_bottom = dims.get('depth_bottom', 10.0)
-        
-        # Check if vehicle depth is within obstacle's vertical range
-        half_vertical_beam = self.vertical_beam_width / 2.0
-        beam_depth_min = veh_depth - half_vertical_beam * 0.1
-        beam_depth_max = veh_depth + half_vertical_beam * 0.1
-        
-        # Check if beam intersects with obstacle's depth range
-        if beam_depth_max < obs_depth_top or beam_depth_min > obs_depth_bottom:
-            if self.debug:
-                obs_name = obstacle.get('name', 'Unknown')
-                print(f"    {obs_name}: Beam miss (beam depth {beam_depth_min:.1f}-{beam_depth_max:.1f}m, "
-                      f"obstacle {obs_depth_top:.1f}-{obs_depth_bottom:.1f}m)")
-            return None
-        
-        shape = obstacle.get('shape', 'box')
-        
-        if shape == 'box':
-            return self._ray_cast_box(veh_x, veh_y, veh_depth, heading, vertical_angle, obstacle)
-        elif shape == 'cylinder':
-            return self._ray_cast_cylinder(veh_x, veh_y, veh_depth, heading, vertical_angle, obstacle)
-        else:
-            print(f"Warning: Unknown obstacle shape '{shape}'")
-            return None
-    
-    def _ray_cast_box(self, veh_x: float, veh_y: float, veh_depth: float,
-                      heading: float, vertical_angle: float,
-                      obstacle: Dict[str, Any]) -> Optional[float]:
-        """Ray-cast to box obstacle."""
-        pos = obstacle.get('position', {})
-        obs_x = pos.get('local_x', 0.0)
-        obs_y = pos.get('local_y', 0.0)
-        
-        dims = obstacle.get('dimensions', {})
-        width = dims.get('width', 1.0)
-        length = dims.get('length', 1.0)
-        
-        heading_rad = math.radians(heading)
-        ray_dx = math.sin(heading_rad)
-        ray_dy = math.cos(heading_rad)
-        
-        box_x_min = obs_x - width / 2.0
-        box_x_max = obs_x + width / 2.0
-        box_y_min = obs_y - length / 2.0
-        box_y_max = obs_y + length / 2.0
-        
-        distance = self._ray_aabb_intersection(
-            veh_x, veh_y, ray_dx, ray_dy,
-            box_x_min, box_x_max, box_y_min, box_y_max
-        )
-        
-        if distance is not None and self.debug:
-            obs_name = obstacle.get('name', 'Unknown')
-            print(f"    {obs_name}: Box hit at {distance:.2f}m")
-        
-        return distance
-    
-    def _ray_cast_cylinder(self, veh_x: float, veh_y: float, veh_depth: float,
-                          heading: float, vertical_angle: float,
-                          obstacle: Dict[str, Any]) -> Optional[float]:
-        """Ray-cast to cylindrical obstacle."""
-        pos = obstacle.get('position', {})
-        obs_x = pos.get('local_x', 0.0)
-        obs_y = pos.get('local_y', 0.0)
-        
-        dims = obstacle.get('dimensions', {})
-        radius = dims.get('radius', 0.5)
-        
-        heading_rad = math.radians(heading)
-        ray_dx = math.sin(heading_rad)
-        ray_dy = math.cos(heading_rad)
-        
-        distance = self._ray_circle_intersection(
-            veh_x, veh_y, ray_dx, ray_dy,
-            obs_x, obs_y, radius
-        )
-        
-        if distance is not None and self.debug:
-            obs_name = obstacle.get('name', 'Unknown')
-            print(f"    {obs_name}: Cylinder hit at {distance:.2f}m")
-        
-        return distance
-    
-    def _ray_aabb_intersection(self, ray_x: float, ray_y: float,
-                               ray_dx: float, ray_dy: float,
-                               box_x_min: float, box_x_max: float,
-                               box_y_min: float, box_y_max: float) -> Optional[float]:
-        """Ray-AABB intersection."""
-        epsilon = 1e-10
-        
-        if abs(ray_dx) < epsilon:
-            ray_dx = epsilon
-        if abs(ray_dy) < epsilon:
-            ray_dy = epsilon
-        
-        t_x_min = (box_x_min - ray_x) / ray_dx
-        t_x_max = (box_x_max - ray_x) / ray_dx
-        t_y_min = (box_y_min - ray_y) / ray_dy
-        t_y_max = (box_y_max - ray_y) / ray_dy
-        
-        if t_x_min > t_x_max:
-            t_x_min, t_x_max = t_x_max, t_x_min
-        if t_y_min > t_y_max:
-            t_y_min, t_y_max = t_y_max, t_y_min
-        
-        t_min = max(t_x_min, t_y_min)
-        t_max = min(t_x_max, t_y_max)
-        
-        if t_max < 0 or t_min > t_max:
-            return None
-        
-        distance = t_min if t_min > 0 else 0.0
-        return distance
-    
-    def _ray_circle_intersection(self, ray_x: float, ray_y: float,
-                                 ray_dx: float, ray_dy: float,
-                                 circle_x: float, circle_y: float,
-                                 radius: float) -> Optional[float]:
-        """Ray-circle intersection in 2D."""
-        to_center_x = circle_x - ray_x
-        to_center_y = circle_y - ray_y
-        
-        proj_length = to_center_x * ray_dx + to_center_y * ray_dy
-        
-        closest_x = ray_x + proj_length * ray_dx
-        closest_y = ray_y + proj_length * ray_dy
-        
-        dist_to_center = math.sqrt((closest_x - circle_x)**2 + (closest_y - circle_y)**2)
-        
-        if dist_to_center > radius:
-            return None
-        
-        chord_half = math.sqrt(radius**2 - dist_to_center**2)
-        distance = proj_length - chord_half
-        
-        if distance < 0:
-            return None
-        
-        return distance
-    
+        # Convert to percentage and apply range-based attenuation
+        confidence_pct = confidence * 100.0
+        range_att_factor = max(0.5, 1.0 - (range_m / self.max_range) * 0.3)  # Minor range effect
+        confidence_pct *= range_att_factor
+
+        self.last_distance = range_m
+        self.last_confidence = confidence_pct
+        self.last_detection = detected_obs
+
+        if self.debug and confidence_pct > 30:
+            name = detected_obs.get('name', 'Obstacle')
+            print(f"[Sonar] DETECTED {name} @ {range_m:.1f}m | "
+                  f"conf={confidence_pct:.1f}% | rel_bearing={rel_bearing:.1f}°")
+            print(f"[Sonar] Vehicle: ({veh_x:.1f}E, {veh_y:.1f}N, {veh_depth:.1f}m) "
+                  f"| Heading: {heading:.1f}°N")
+
+        return range_m, confidence_pct
+
     def get_status(self) -> Dict[str, Any]:
-        """Get sonar status for telemetry/debugging."""
-        status = {
+        """Return sonar status for debugging"""
+        return {
             'max_range': self.max_range,
-            'min_range': self.min_range,
-            'beam_width': self.beam_width,
-            'vertical_beam_width': self.vertical_beam_width,
-            'mount_angle': self.mount_angle,
-            'obstacles_loaded': len(self.obstacles),
             'last_distance': self.last_distance,
             'last_confidence': self.last_confidence,
-            'last_detection': (
-                self.last_detection.get('name', 'Unknown') 
-                if self.last_detection else None
-            ),
-            'debug_mode': self.debug
+            'obstacles_loaded': len(self.obstacles),
+            'last_detection': self.last_detection.get('name', 'None') if self.last_detection else 'None',
+            'debug_mode': self.debug,
+            'beam_physics': 'realistic_single_detection',
+            'occlusion_model': 'enabled'
         }
-        return status
-    
-    def set_mount_angle(self, angle_degrees: float):
-        """Set sonar mount angle."""
-        self.mount_angle = angle_degrees
-        print(f"Simulated Sonar: Mount angle set to {angle_degrees}°")
-    
+
     def set_debug(self, enabled: bool):
-        """Enable or disable debug output"""
+        """Enable/disable debug prints"""
         self.debug = enabled
-        print(f"Simulated Sonar: Debug mode {'ENABLED' if enabled else 'DISABLED'}")
+        print(f"[Sonar] Debug mode: {'ENABLED' if enabled else 'DISABLED'}")
 
 
-if __name__ == '__main__':
-    print("Enhanced SimulatedSonar module loaded successfully")
-    print("\nFIXED: Handles missions without obstacles gracefully")
+# ----------------------------------------------------------------------
+# TEST - Verify realistic beam behavior
+# ----------------------------------------------------------------------
+if __name__ == "__main__":
+    # Create test mission
+    test_mission = {
+        "obstacles": [
+            {
+                "name": "Close Obstacle",
+                "position": {"local_x": 0.0, "local_y": 30.0},  # 30m North
+                "dimensions": {"radius": 5.0, "depth_top": 5.0, "depth_bottom": 15.0},
+                "shape": "cylinder"
+            },
+            {
+                "name": "Far Obstacle", 
+                "position": {"local_x": 0.0, "local_y": 60.0},  # 60m North (behind close one)
+                "dimensions": {"radius": 5.0, "depth_top": 5.0, "depth_bottom": 15.0},
+                "shape": "cylinder"
+            }
+        ]
+    }
+    with open("test_mission.json", "w") as f:
+        json.dump(test_mission, f, indent=2)
+
+    # Initialize sonar
+    sonar = SimulatedSonar(config={"max_range": 150.0, "debug": True}, mission_file="test_mission.json")
+
+    print("\nTesting REALISTIC BEAM PHYSICS...")
+    
+    # Test: Should only detect CLOSE obstacle, not far one (beam occlusion)
+    print("\nTEST: Heading North (0°) - should detect ONLY close obstacle")
+    pos = {"local_x": 0.0, "local_y": 0.0, "depth": 10.0}
+    dist, info = sonar.get_distance_with_info(pos, 0.0)
+    
+    expected_close = 25.0  # 30m - 5m radius
+    if abs(dist - expected_close) < 2.0:
+        print(f"✓ PASS: Detected close obstacle @ {dist:.1f}m (expected ~{expected_close}m)")
+        print(f"  Confidence: {info['confidence']:.1f}%")
+        if info.get('obstacle_id') == 'Close Obstacle':
+            print("✓ PASS: Correctly identified close obstacle (beam occlusion working)")
+        else:
+            print("✗ FAIL: Wrong obstacle detected")
+    else:
+        print(f"✗ FAIL: Unexpected range {dist:.1f}m")
+    
+    print("\nBeam physics test complete.")

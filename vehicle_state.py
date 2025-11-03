@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-vehicle_state.py - UPDATED: Added task_params and leak detection system for three watertight cylinders
+vehicle_state.py - UPDATED: Added local_x, local_y for obstacle tracking
+- Added local ENU coordinates (East-North-Up) to nav_state
 - set_initial_position() now only sets true_state (physics reality)
 - Navigation system must initialize itself through GPS or other sensors
 - Added leak_detection for FWD_WTC, MID_WTC, AFT_WTC monitoring
@@ -88,7 +89,9 @@ class VehicleState:
             'accel_y': 0.0,
             'accel_z': 9.81,
             'position_uncertainty': 1000.0,  # Start with high uncertainty
-            'distance_to_waypoint': 0.0
+            'distance_to_waypoint': 0.0,
+            'local_x': 0.0,  # Local East coordinate in meters (for obstacle tracking)
+            'local_y': 0.0   # Local North coordinate in meters (for obstacle tracking)
         }
         
         # Target state - navigation/control targets only
@@ -195,21 +198,12 @@ class VehicleState:
                 'heading': self.nav_state['heading']
             }
     
-    def update_true_state(self, **kwargs):
-        """Update true vehicle state (physics simulation only)."""
-        with self._state_lock:
-            self.true_state.update(kwargs)
-            if 'true_depth' in kwargs:
-                self.true_state['true_depth'] = max(0.0, kwargs['true_depth'])
-            if 'true_heading' in kwargs:
-                self.true_state['true_heading'] = kwargs['true_heading'] % 360.0
-    
     def update_nav_state(self, **kwargs):
-        """Update navigation state (navigation system only)."""
+        """Update navigation state. Navigation system should use this to write its estimates."""
         with self._state_lock:
             self.nav_state.update(kwargs)
-            if 'depth' in kwargs:
-                self.nav_state['depth'] = max(0.0, kwargs['depth'])
+            
+            # Constrain heading if provided
             if 'heading' in kwargs:
                 self.nav_state['heading'] = kwargs['heading'] % 360.0
     

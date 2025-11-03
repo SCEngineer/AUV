@@ -1,0 +1,50 @@
+2025-11-02 15:58:28,321 - ================================================================================
+2025-11-02 15:58:28,322 - HAL Telemetry Logger Started - Mode: simulation
+2025-11-02 15:58:28,322 - ================================================================================
+2025-11-02 15:58:28,323 - Simulation: Enhanced simulated sonar initialized
+2025-11-02 15:58:28,327 - Simulation: VehicleDynamics initialized
+2025-11-02 15:58:28,328 - Simulation: SensorModels initialized
+2025-11-02 15:58:28,328 - SimulationManager initialized (mode=SIMULATION, Ping1D-style sonar interface active)
+2025-11-02 15:58:28,329 - FIXED: GPS to ENU coordinate conversion enabled for sonar simulation
+2025-11-02 15:58:28,329 - Enhanced HAL initialized in simulation mode with vehicle ID: SIMPLR-AUV-1762127908
+2025-11-02 15:58:28,329 - HAL Architecture: ROUTER/MANAGER (obstacle avoidance handled by main controller)
+2025-11-02 15:58:28,355 - Simulation: Mission origin set to (34.262792, -117.168561)
+2025-11-02 15:58:28,355 - Simulation: Converted South Leg Obstacle: (34.260993, -117.168561) → (0.0m, -200.2m)
+2025-11-02 15:58:28,355 - Simulation: Converted East Leg Obstacle: (34.261892, -117.167473) → (100.1m, -100.1m)
+2025-11-02 15:58:28,355 - Simulation: Converted North Leg Obstacle: (34.262792, -117.168017) → (50.1m, 0.0m)
+2025-11-02 15:58:28,355 - Simulation: Converted West Leg Obstacle: (34.262792, -117.168017) → (50.1m, 0.0m)
+2025-11-02 15:58:28,356 - Simulation: Loaded 4 obstacle(s) into sonar with local coordinates
+2025-11-02 15:58:28,358 - [HAL] Auto-detected initialization with valid coordinates: (34.262798, -117.168576)
+2025-11-02 15:58:28,358 - [HAL] ✓ Vehicle marked as initialized
+2025-11-02 15:58:28,358 - [HAL] Activation deferred - mission_loaded: False, initialized: True, mission_started: False
+2025-11-02 15:59:30,269 - Simulation: Ballast command received: FILL
+2025-11-02 15:59:30,270 - Simulation: Ballast filling - 0.3%
+2025-11-02 15:59:32,275 - Simulation: Ballast filling - 5.3%
+2025-11-02 15:59:34,282 - Simulation: Ballast filling - 10.3%
+2025-11-02 15:59:36,288 - Simulation: Ballast filling - 15.4%
+2025-11-02 15:59:38,295 - Simulation: Ballast filling - 20.4%
+2025-11-02 15:59:40,302 - Simulation: Ballast filling - 25.5%
+2025-11-02 15:59:42,308 - Simulation: Ballast filling - 30.5%
+2025-11-02 15:59:44,315 - Simulation: Ballast filling - 35.6%
+2025-11-02 15:59:46,322 - Simulation: Ballast filling - 40.6%
+2025-11-02 15:59:48,329 - Simulation: Ballast filling - 45.7%
+2025-11-02 15:59:50,336 - Simulation: Ballast filling - 50.7%
+2025-11-02 15:59:52,344 - Simulation: Ballast filling - 55.8%
+2025-11-02 15:59:54,350 - Simulation: Ballast filling - 60.8%
+2025-11-02 15:59:56,358 - Simulation: Ballast filling - 65.8%
+2025-11-02 15:59:58,365 - Simulation: Ballast filling - 70.9%
+2025-11-02 16:00:00,371 - Simulation: Ballast filling - 75.9%
+2025-11-02 16:00:02,378 - Simulation: Ballast filling - 81.0%
+2025-11-02 16:00:04,385 - Simulation: Ballast filling - 86.0%
+2025-11-02 16:00:06,390 - Simulation: Ballast filling - 91.1%
+2025-11-02 16:00:08,397 - Simulation: Ballast filling - 96.1%
+2025-11-02 16:00:09,702 - Simulation: Ballast command received: OFF
+2025-11-02 16:14:43,620 - Simulation: Ballast command received: EMPTY
+2025-11-02 16:14:43,621 - Simulation: Ballast emptying - 1.4%
+2025-11-02 16:14:43,722 - Simulation: Ballast command received: OFF
+2025-11-02 16:14:46,039 - HAL: Shutting down...
+2025-11-02 16:14:46,039 - Network: Disconnected from GCS - Shutdown
+2025-11-02 16:14:46,039 - HAL: Shutdown complete
+2025-11-02 16:14:46,045 - HAL: Shutting down...
+2025-11-02 16:14:46,046 - Network: Disconnected from GCS - Shutdown
+2025-11-02 16:14:46,046 - HAL: Shutdown complete

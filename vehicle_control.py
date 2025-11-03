@@ -27,6 +27,7 @@ import math
 from typing import Dict, Any
 from vehicle_state import VehicleState
 
+
 class VehicleControl:
     def __init__(self, vehicle_state: VehicleState):
         """Initialize cascaded controller with vehicle state object"""
@@ -36,16 +37,17 @@ class VehicleControl:
         loaded_gains = vehicle_state.control_gains.get('gains', {})
         # Nominal 10 Hz tuned gains for cascaded architecture
         tuned_10hz_defaults = {
-            'depth': {'kp': 0.80, 'ki': 0.05, 'kd': 0.20},   # deg per meter (outer)
-            'pitch': {'kp': 2.00, 'ki': 0.02, 'kd': 0.25},   # fin authority mapping (inner)
-            'heading': {'kp': 0.26, 'ki': 0.026, 'kd': 0.06}, # Scaled for 10 Hz
-            'speed': {'kp': 30.0, 'ki': 0.25, 'kd': 0.30},    # Aligned with verify_gains_loaded
+            'depth':   {'kp': 0.80, 'ki': 0.05,  'kd': 0.20},   # deg per meter (outer)
+            'pitch':   {'kp': 2.00, 'ki': 0.02,  'kd': 0.25},   # fin authority mapping (inner)
+            'heading': {'kp': 0.26, 'ki': 0.026, 'kd': 0.06},   # Scaled for 10 Hz
+            'speed':   {'kp': 30.0, 'ki': 0.25,  'kd': 0.30},   # Aligned with verify_gains_loaded
         }
 
         # Obstacle avoidance integration settings
         self.obstacle_avoidance_enabled = vehicle_state.control_gains.get('obstacle_avoidance_enabled', True)
-        self.sonar_speed_reduction_threshold = vehicle_state.control_gains.get('sonar_speed_reduction_threshold', 10.0)  # m
-        self.sonar_speed_reduction_factor = vehicle_state.control_gains.get('sonar_speed_reduction_factor', 0.5)
+        # Patched defaults: realistic slow-down band for your logs (70–100m typical -> act by ~50m)
+        self.sonar_speed_reduction_threshold = vehicle_state.control_gains.get('sonar_speed_reduction_threshold', 50.0)  # m
+        self.sonar_speed_reduction_factor = vehicle_state.control_gains.get('sonar_speed_reduction_factor', 0.6)
 
         # Merge loaded gains with 10 Hz defaults
         self.gains = {}
@@ -55,7 +57,7 @@ class VehicleControl:
                     kp, ki, kd = loaded_gains[axis]
                     self.gains[axis] = {'kp': kp, 'ki': ki, 'kd': kd}
                 else:
-                    self.gains[axis] = loaded_gains[axis]
+                    self.gains[axis] = dict(tuned_10hz_defaults[axis], **loaded_gains[axis])
             else:
                 self.gains[axis] = tuned_10hz_defaults[axis]
 
@@ -100,7 +102,8 @@ class VehicleControl:
         self.min_speed_for_feedforward = 0.1
 
         # Track last waypoint and obstacle avoidance state
-        self.last_waypoint_target = None
+        self.last_waypoint_global = None   # (lat, lon, depth)
+        self.last_waypoint_local = None    # (local_x, local_y, depth)
         self.last_oa_state = "NORMAL"
 
         print("VehicleControl (cascaded depth->pitch->fins) initialized")
@@ -118,22 +121,41 @@ class VehicleControl:
         return error
 
     def _check_for_waypoint_change(self):
-        """Check if waypoint changed and reset integrators if needed"""
-        target = self.vehicle_state.target_state
-        current_waypoint = (
-            target.get('target_lat'),
-            target.get('target_lon'),
-            target.get('target_depth')
+        """Check if waypoint changed and reset integrators if needed (global AND local)"""
+        t = self.vehicle_state.target_state
+
+        current_wp_global = (
+            t.get('target_lat'),
+            t.get('target_lon'),
+            t.get('target_depth')
+        )
+        current_wp_local = (
+            t.get('target_local_x'),
+            t.get('target_local_y'),
+            t.get('target_depth')
         )
 
-        if (current_waypoint != self.last_waypoint_target and
-                current_waypoint[0] is not None and current_waypoint[1] is not None):
+        global_changed = (
+            current_wp_global != self.last_waypoint_global and
+            current_wp_global[0] is not None and current_wp_global[1] is not None
+        )
+        local_changed = (
+            current_wp_local != self.last_waypoint_local and
+            current_wp_local[0] is not None and current_wp_local[1] is not None
+        )
+
+        if global_changed or local_changed:
             self.reset_integrators()
             print("VehicleControl: New waypoint detected -> integrators reset")
-            lat, lon, d = current_waypoint
-            print(f"  New waypoint: ({lat:.6f}, {lon:.6f}, {d:.1f}m)")
+            if global_changed:
+                lat, lon, d = current_wp_global
+                print(f"  New waypoint (global): ({lat:.6f}, {lon:.6f}, {d:.1f}m)")
+            if local_changed:
+                lx, ly, d = current_wp_local
+                print(f"  New waypoint (local):  (x={lx:.1f}m, y={ly:.1f}m, {d:.1f}m)")
 
-        self.last_waypoint_target = current_waypoint
+        self.last_waypoint_global = current_wp_global
+        self.last_waypoint_local = current_wp_local
 
     def _check_for_oa_state_change(self):
         """Check for obstacle avoidance state changes and reset integrators"""
@@ -157,14 +179,14 @@ class VehicleControl:
         self.prev_depth_cmd = limited_cmd
         return limited_cmd
 
-    def _check_depth_integrator_reset(self, cmd_depth: float):
-        """Reset depth integrator on large command changes"""
-        if abs(cmd_depth - self.prev_depth_cmd) > self.depth_reset_threshold:
+    def _check_depth_integrator_reset(self, cmd_depth: float, prev_cmd_before_rate: float):
+        """Reset depth integrator on large command changes (compare to pre-rate-limit value)"""
+        if abs(cmd_depth - prev_cmd_before_rate) > self.depth_reset_threshold:
             old_int = self.integrators['depth']
             self.integrators['depth'] = 0.0
             self.prev_errors['depth'] = 0.0
             self.smooth_derivatives['depth'] = 0.0
-            print(f"VehicleControl: depth integrator reset (delta_cmd {cmd_depth - self.prev_depth_cmd:.2f} m)")
+            print(f"VehicleControl: depth integrator reset (Δcmd {cmd_depth - prev_cmd_before_rate:.2f} m)")
             print(f"  old integrator: {old_int:.3f} -> 0.0")
 
     def _pid_generic(self, axis: str, error: float, dt: float) -> float:
@@ -189,6 +211,26 @@ class VehicleControl:
         output = g['kp'] * error + g['ki'] * self.integrators[axis] + g['kd'] * deriv
         return output
 
+    def _is_oa_active(self) -> bool:
+        """
+        Return True when OA should have priority over guidance.
+        Per your requirement: OA is active during SCAN, APPROACHING, AVOID_LEFT, AVOID_RIGHT.
+        OA influence stops in CLEARING.
+        """
+        if not (self.obstacle_avoidance_enabled and
+                hasattr(self.vehicle_state, 'obstacle_avoidance') and
+                self.vehicle_state.obstacle_avoidance):
+            return False
+        oa_state = self.vehicle_state.obstacle_avoidance.state
+        if oa_state is None:
+            return False
+        if oa_state.startswith("AVOID_"):
+            return True
+        if oa_state in {"SCAN", "APPROACHING"}:
+            return True
+        # Explicitly stop OA influence in CLEARING (your choice)
+        return False
+
     def update(self, dt: float = 0.1) -> Dict[str, Any]:
         """
         Main control update for cascaded architecture. Call at 10 Hz (dt=0.1).
@@ -209,39 +251,43 @@ class VehicleControl:
         raw_cmd_depth = target.get('target_depth', 0.0)
         cmd_speed = target.get('target_speed', 0.0)
 
-        # Prioritize obstacle avoidance targets
-        oa_active = False
-        if (self.obstacle_avoidance_enabled and
-                hasattr(self.vehicle_state, 'obstacle_avoidance') and
-                self.vehicle_state.obstacle_avoidance and
-                self.vehicle_state.obstacle_avoidance.state == "AVOIDING"):
-            oa_active = True
+        # Prioritize obstacle avoidance targets if OA active
+        oa_active = self._is_oa_active()
+        if oa_active:
+            # Prefer OA's targets (OA writes into target_state)
             cmd_heading = target.get('target_heading', cmd_heading)
             raw_cmd_depth = target.get('target_depth', raw_cmd_depth)
-            cmd_speed = target.get('target_speed', cmd_speed)
+            cmd_speed   = target.get('target_speed', cmd_speed)
+            # Optionally soften heading integral to avoid fighting OA-induced turns
+            self.integrators['heading'] *= 0.3
 
-        # Adjust speed based on sonar proximity
+        # Adjust speed based on sonar proximity (confidence is 0-100%)
         sonar_pkt = self.vehicle_state.sensor_data.get("sonar", {})
         sonar_range = sonar_pkt.get("range", float('inf'))
         sonar_confidence = sonar_pkt.get("confidence", 0.0)
         if (self.obstacle_avoidance_enabled and
                 sonar_confidence >= 30.0 and
                 sonar_range < self.sonar_speed_reduction_threshold):
-            speed_reduction = self.sonar_speed_reduction_factor * (1.0 - sonar_range / self.sonar_speed_reduction_threshold)
-            cmd_speed = cmd_speed * max(0.2, 1.0 - speed_reduction)
-            print(f"VehicleControl: Sonar proximity ({sonar_range:.1f}m, conf={sonar_confidence:.1f}%) -> "
-                  f"speed reduced to {cmd_speed:.2f} m/s")
+            # Scale reduction with proximity; clamp min scale to 0.2
+            proximity = max(0.0, min(1.0, 1.0 - sonar_range / self.sonar_speed_reduction_threshold))
+            speed_reduction = self.sonar_speed_reduction_factor * proximity
+            new_speed = cmd_speed * max(0.2, 1.0 - speed_reduction)
+            if new_speed < cmd_speed:
+                print(f"VehicleControl: Sonar proximity ({sonar_range:.1f}m, conf={sonar_confidence:.1f}%) -> "
+                      f"speed reduced {cmd_speed:.2f} -> {new_speed:.2f} m/s")
+                cmd_speed = new_speed
 
-        # Rate-limit depth command and protect integrator
+        # Rate-limit depth command and protect integrator (use pre-rate-limit snapshot)
+        prev_before_rate = self.prev_depth_cmd
         cmd_depth = self._rate_limit_depth_command(raw_cmd_depth, dt)
-        self._check_depth_integrator_reset(cmd_depth)
+        self._check_depth_integrator_reset(cmd_depth, prev_before_rate)
 
         current_heading = current.get('heading', 0.0)
         current_depth = current.get('depth', 0.0)
         current_speed = max(0.0, current.get('speed', 0.0))
         current_pitch = current.get('pitch', 0.0)
 
-        # OUTER LOOP: depth -> pitch_cmd
+        # OUTER LOOP: depth -> pitch_cmd (with speed-based gain scheduling)
         depth_error = cmd_depth - current_depth
         gain_factor = current_speed / self.speed_nominal if self.speed_nominal > 0.0 else 1.0
         gain_factor = max(0.5, min(2.0, gain_factor))
@@ -252,7 +298,7 @@ class VehicleControl:
 
         self.integrators['depth'] += depth_error * dt
         self.integrators['depth'] = max(-self.integrator_limits['depth'],
-                                       min(self.integrator_limits['depth'], self.integrators['depth']))
+                                        min(self.integrator_limits['depth'], self.integrators['depth']))
         raw_depth_deriv = (depth_error - self.prev_errors['depth']) / dt
         alpha = 0.8
         self.smooth_derivatives['depth'] = alpha * self.smooth_derivatives['depth'] + (1 - alpha) * raw_depth_deriv
@@ -268,6 +314,9 @@ class VehicleControl:
         pitch_ff_deg = math.degrees(pitch_ff_rad)
 
         pitch_cmd_deg = pid_pitch_cmd + pitch_ff_deg
+        # Limit pitch command to reasonable authority
+        if abs(pitch_cmd_deg) > self.pitch_cmd_limit:
+            pitch_cmd_deg = math.copysign(self.pitch_cmd_limit, pitch_cmd_deg)
 
         # INNER LOOP: pitch -> fin commands
         pitch_error = pitch_cmd_deg - current_pitch
@@ -277,12 +326,14 @@ class VehicleControl:
         # HEADING and SPEED controllers
         heading_error = self._normalize_heading_error(cmd_heading - current_heading)
         yaw_output = self._pid_generic('heading', heading_error, dt)
+        # Clamp yaw_output to fin authority to avoid mixing saturation bursts
+        yaw_output = max(-self.fin_limit_deg, min(self.fin_limit_deg, yaw_output))
 
         speed_error = cmd_speed - current_speed
         thrust_output = self._pid_generic('speed', speed_error, dt)
         thruster_cmd = max(0.0, min(100.0, thrust_output))
 
-        # X-tail mixing
+        # X-tail mixing (UL/UR upper; LL/LR lower)
         yaw_cmd = yaw_output
         pitch_cmd = fin_effect
 
@@ -374,7 +425,8 @@ class VehicleControl:
             'integrators': self.integrators.copy(),
             'prev_errors': self.prev_errors.copy(),
             'integrator_limits': self.integrator_limits.copy(),
-            'last_waypoint': self.last_waypoint_target,
+            'last_waypoint_global': self.last_waypoint_global,
+            'last_waypoint_local': self.last_waypoint_local,
             'loaded_from_file': bool(self.vehicle_state.control_gains.get('control_gains')),
             'update_rate': '10 Hz',
             'controller_type': 'cascaded_depth_pitch_fins',
@@ -398,8 +450,8 @@ class VehicleControl:
             'obstacle_avoidance': {
                 'enabled': self.obstacle_avoidance_enabled,
                 'state': (self.vehicle_state.obstacle_avoidance.state
-                         if hasattr(self.vehicle_state, 'obstacle_avoidance') and
-                         self.vehicle_state.obstacle_avoidance else "N/A"),
+                          if hasattr(self.vehicle_state, 'obstacle_avoidance') and
+                             self.vehicle_state.obstacle_avoidance else "N/A"),
                 'sonar_speed_reduction': {
                     'threshold': self.sonar_speed_reduction_threshold,
                     'factor': self.sonar_speed_reduction_factor

@@ -1,676 +1,578 @@
 #!/usr/bin/env python3
 """
-obstacle_avoidance.py - SAFE Multi-Obstacle Avoidance for SIMPLR AUV
+obstacle_avoidance.py - 3D CARROT CHASE WITH CROSS-TRACK ERROR MINIMIZATION
+-----------------------------------------------------------------------------
+- Detect obstacle via sonar
+- Evaluate avoidance options: LEFT, RIGHT, DIVE, CLIMB
+- Select maneuver that minimizes cross-track error from mission route
+- Generate 3D carrot (x, y, z) with adaptive radius based on position uncertainty
+- Navigate to carrot → return to NORMAL
 
-REALISTIC SONAR ASSUMPTIONS:
-- Forward sonar only provides: distance and confidence
-- NO information about obstacle shape, size, or vertical extent
-- NO altitude sensor (don't know distance to bottom)
+MISSION-AGNOSTIC DESIGN:
+- Algorithm uses ONLY real-time sensor data + mission route waypoints
+- Does NOT use a priori obstacle positions from mission file
+- Mission obstacles used only for post-mission visualization/analysis
 
-SAFE AVOIDANCE STRATEGY:
-1. PRIMARY: Horizontal turning (always safe)
-2. SECONDARY: Depth changes ONLY if:
-   - Not in SURFACED_TRIM state (can't dive from surface)
-   - Not at minimum depth (can't go up from surface)
-   - Have known safe depth limits from mission
-   - Horizontal turning is failing
-
-FIXES APPLIED:
-- Earlier detection (50m threshold)
-- No flip-flopping (3s minimum between reversals)
-- Committed turn execution (5s minimum)
-- Smart strategy switching
-- Respects vehicle state constraints
-- Conservative depth changes only as last resort
+ADAPTIVE WAYPOINT RADIUS:
+- Uses position_uncertainty directly from vehicle_state.nav_state
+- Scales waypoint acceptance radius based on navigation uncertainty
+- Separate horizontal and vertical tolerances
 """
 
 import time
+import math
 import csv
-from typing import Dict, Any, Optional, List
-from vehicle_state import VehicleState, SystemState
-
-
-class ObstacleEvent:
-    """Tracks individual obstacle encounters"""
-    def __init__(self, distance: float, confidence: float, timestamp: float):
-        self.distance = distance
-        self.confidence = confidence
-        self.timestamp = timestamp
-        self.avoidance_start_time = None
-        self.avoidance_duration = 0.0
-        self.cleared = False
+import os
+import json
+from typing import Dict, Any, Optional, Tuple, List
+from pathlib import Path
 
 
 class ObstacleAvoidance:
-    """Safe multi-obstacle avoidance using single forward sonar"""
-
-    def __init__(self, vehicle_state: VehicleState, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, vehicle_state, config: Optional[dict] = None, config_file: Optional[str] = None, 
+                 mission_file: Optional[str] = None):
         self.vehicle_state = vehicle_state
-        cfg = config or {}
 
-        # Core detection parameters
-        self.enabled = cfg.get("enabled", True)
-        self.detection_threshold = cfg.get("detection_threshold", 50.0)
-        self.clear_threshold = cfg.get("clear_threshold", 60.0)
-        self.confidence_threshold = cfg.get("confidence_threshold", 60.0)
-        self.turn_rate = cfg.get("turn_rate", 15.0)
-        self.speed_reduction_factor = cfg.get("speed_reduction_factor", 0.5)
+        # Load configuration
+        cfg = {}
+        if config_file and Path(config_file).exists():
+            try:
+                with open(config_file, "r") as f:
+                    cfg = json.load(f)
+                print(f"[OA] Loaded config: {config_file}")
+            except Exception as e:
+                print(f"[OA] Failed to load config {config_file}: {e}")
+        if config:
+            cfg = {**cfg, **config}
+        self.config = cfg
+
+        # Load mission file for waypoint/track information (NOT for obstacle positions)
+        self.mission = {}
+        self.waypoints = []
+        if mission_file and Path(mission_file).exists():
+            try:
+                with open(mission_file, "r") as f:
+                    self.mission = json.load(f)
+                self._extract_waypoints()
+                print(f"[OA] Loaded mission: {mission_file}")
+                print(f"[OA] Found {len(self.waypoints)} waypoints for track calculation")
+            except Exception as e:
+                print(f"[OA] Failed to load mission {mission_file}: {e}")
+
+        detection_cfg = cfg.get("detection", {})
+        behavior_cfg  = cfg.get("behavior", {})
+        depth_cfg = cfg.get("depth", {})
+        speed_cfg     = cfg.get("speed", {})
+        logging_cfg   = cfg.get("logging", {})
+
+        # Detection thresholds
+        self.max_range = float(detection_cfg.get("max_range", 100.0))
         
-        # Sonar parameters
-        self.max_range = cfg.get("max_range", 100.0)
-        self.out_of_beam_confidence = cfg.get("out_of_beam_confidence", 10.0)
-
-        # SAFE depth avoidance parameters
-        self.avoidance_mode = cfg.get("avoidance_mode", "horizontal")  # Default: horizontal only
-        self.depth_avoidance_offset = cfg.get("depth_avoidance_offset", 3.0)
-        self.min_avoidance_depth = cfg.get("min_avoidance_depth", 0.5)
-        self.max_avoidance_depth = cfg.get("max_avoidance_depth", 15.0)
-        self.use_depth_as_last_resort = cfg.get("use_depth_as_last_resort", False)
-
-        # Turn commitment parameters
-        self.min_turn_commitment_time = cfg.get("min_turn_commitment_time", 5.0)
-        self.min_reversal_interval = cfg.get("min_reversal_interval", 3.0)
-        self.last_reversal_time = 0.0
-        self.current_turn_start_time = 0.0
-        self.turn_committed = False
-        self.min_heading_change_for_commit = cfg.get("min_heading_change", 45.0)
-        self.heading_at_turn_start = None
-
-        # Maneuver failure detection
-        self.maneuver_failing_threshold = cfg.get("maneuver_failing_threshold", 5.0)  # 5s
-        self.time_approaching_obstacle = 0.0
-        self.last_distance_check = None
-        self.maneuver_failure_count = 0
-        self.max_maneuver_failures = 3
-        self.tried_depth_avoidance = False
-
-        # Multi-obstacle tracking
-        self.obstacle_cooldown = cfg.get("obstacle_cooldown", 10.0)
-        self.min_obstacle_separation = cfg.get("min_obstacle_separation", 5.0)
+        if "activation_distance_factor" in detection_cfg:
+            self.activation_distance = self.max_range * float(detection_cfg.get("activation_distance_factor"))
+        else:
+            self.activation_distance = float(detection_cfg.get("activation_distance", 65.0))
         
-        # Mission context
-        self.original_mission_context = None
+        self.activation_confidence = float(detection_cfg.get("activation_confidence", 0.60))
 
-        # CSV logging
-        self.csv_logging_enabled = cfg.get("csv_logging", True)
+        # Horizontal carrot parameters
+        self.lateral_offset = float(behavior_cfg.get("lateral_offset", 55.0))
+        
+        if "carrot_distance" in behavior_cfg:
+            self.carrot_distance = float(behavior_cfg.get("carrot_distance", 40.0))
+            self.use_fixed_carrot_distance = True
+            self.range_multiplier = 1.2
+        else:
+            self.range_multiplier = float(behavior_cfg.get("range_multiplier", 1.2))
+            self.use_fixed_carrot_distance = False
+            self.carrot_distance = 40.0
+        
+        # Depth avoidance parameters
+        self.enable_depth_avoidance = bool(depth_cfg.get("enable_depth_avoidance", True))
+        self.vertical_clearance_margin = float(depth_cfg.get("vertical_clearance_margin", 5.0))
+        self.horizontal_clearance_margin = float(depth_cfg.get("horizontal_clearance_margin", 10.0))
+        self.min_operating_depth = float(depth_cfg.get("min_operating_depth", 2.0))
+        self.max_operating_depth = float(depth_cfg.get("max_operating_depth", 50.0))
+        self.depth_tolerance = float(depth_cfg.get("depth_tolerance", 2.0))
+        
+        # Cross-track error weighting for maneuver selection
+        self.cross_track_weight = float(behavior_cfg.get("cross_track_weight", 1.0))
+        
+        # Adaptive waypoint radius parameters
+        self.use_adaptive_radius = bool(behavior_cfg.get("use_adaptive_radius", True))
+        self.base_waypoint_radius = float(behavior_cfg.get("base_waypoint_radius", 5.0))
+        self.max_waypoint_radius = float(behavior_cfg.get("max_waypoint_radius", 25.0))
+        self.uncertainty_scale_factor = float(behavior_cfg.get("uncertainty_scale_factor", 0.5))
+        self.fixed_waypoint_radius = float(behavior_cfg.get("waypoint_radius", 10.0))
+
+        # Speeds
+        self.avoidance_speed = float(speed_cfg.get("avoidance_speed", 0.7))
+        self.normal_speed = float(speed_cfg.get("normal_speed", 1.0))
+
+        # State
+        self.state = "NORMAL"
+        self.carrot_waypoint: Optional[Tuple[float, float, float]] = None  # Now 3D: (x, y, z)
+        self.avoidance_id = 1
+        self.selected_maneuver = None  # Track which maneuver was selected
+        self.nominal_depth = 0.0  # Depth to return to after avoidance
+        
+        # Logging
+        self.csv_logging_enabled = bool(logging_cfg.get("enabled", True))
+        self.csv_output_enabled = bool(logging_cfg.get("csv_output", True))
+        self.log_directory = logging_cfg.get("log_directory", "logs")
+        self.debug_output = bool(logging_cfg.get("debug_output", True))
         self.csv_file = None
         self.csv_writer = None
-        self.log_counter = 0
-
-        # Internal state
-        self.state = "NORMAL"
-        self.current_obstacle = None
-        self.obstacle_history: List[ObstacleEvent] = []
-        
-        # Current sonar reading
-        self.sonar_distance: Optional[float] = None
-        self.sonar_confidence: Optional[float] = None
-        self.prev_sonar_distance: Optional[float] = None
-        self.prev_sonar_confidence: Optional[float] = None
-        self.sonar_timestamp: float = 0.0
-
-        # Avoidance parameters
-        self.turn_direction: Optional[str] = None
-        self.depth_direction: Optional[str] = None
-        self.original_heading: Optional[float] = None
-        self.original_speed: Optional[float] = None
-        self.original_depth: Optional[float] = None
-        self.avoidance_start_time: Optional[float] = None
-        self.using_depth_avoidance = False
-
-        # Statistics
-        self.total_avoidances = 0
-        self.total_avoidance_time = 0.0
-        self.direction_reversals = 0
-        self.current_avoidance_id = 0
-
-        if self.csv_logging_enabled:
-            self._init_csv_logging()
+        self._init_csv_logging()
 
         print("=" * 70)
-        print("SAFE MULTI-OBSTACLE AVOIDANCE SYSTEM INITIALIZED")
+        print("OBSTACLE AVOIDANCE - 3D CARROT CHASE WITH CROSS-TRACK MINIMIZATION")
+        print(f"  Activation: range < {self.activation_distance:.1f}m, conf > {self.activation_confidence}")
+        print(f"  Depth Avoidance: {'ENABLED' if self.enable_depth_avoidance else 'DISABLED'}")
+        if self.enable_depth_avoidance:
+            print(f"    Vertical clearance: {self.vertical_clearance_margin}m")
+            print(f"    Depth limits: {self.min_operating_depth}m - {self.max_operating_depth}m")
+            print(f"    Depth tolerance: {self.depth_tolerance}m")
+        print(f"  Horizontal clearance: {self.horizontal_clearance_margin}m")
+        if self.use_adaptive_radius:
+            print(f"  Adaptive waypoint radius:")
+            print(f"    Base: {self.base_waypoint_radius}m")
+            print(f"    Max:  {self.max_waypoint_radius}m")
+            print(f"    Scale factor: {self.uncertainty_scale_factor}")
         print("=" * 70)
-        print(f"  Status: {'ENABLED' if self.enabled else 'DISABLED'}")
-        print(f"  Primary strategy: HORIZONTAL TURNING")
-        print(f"  Secondary strategy: {'DEPTH (last resort)' if self.use_depth_as_last_resort else 'DISABLED'}")
-        print(f"  Detection: <{self.detection_threshold}m, Clear: >{self.clear_threshold}m")
-        print(f"  Confidence: ≥{self.confidence_threshold}%")
-        print(f"  Turn rate: {self.turn_rate}°/s, Speed reduction: {self.speed_reduction_factor}x")
-        print(f"  Turn commitment: {self.min_turn_commitment_time}s minimum")
-        print(f"  Safe depth range: {self.min_avoidance_depth}m - {self.max_avoidance_depth}m")
-        print("=" * 70)
 
-    def update_sonar(self, sonar_pkt: Any):
-        """Accept sonar packet"""
-        try:
-            self.prev_sonar_distance = self.sonar_distance
-            self.prev_sonar_confidence = self.sonar_confidence
-
-            if isinstance(sonar_pkt, dict) and "range" in sonar_pkt:
-                rng = sonar_pkt.get("range", None)
-                conf = sonar_pkt.get("confidence", 100.0)
-                self.sonar_distance = float(rng) if rng is not None else None
-                self.sonar_confidence = float(conf) if conf is not None else None
-                self.sonar_timestamp = float(sonar_pkt.get("timestamp", time.time()))
-            else:
-                self.sonar_distance = float(sonar_pkt) if sonar_pkt is not None else None
-                self.sonar_confidence = 100.0
-                self.sonar_timestamp = time.time()
-                
-        except Exception as e:
-            print(f"ObstacleAvoidance: Sonar packet error: {e}")
-            self.sonar_distance = None
-            self.sonar_confidence = None
-
-    def _is_new_obstacle(self, distance: float, confidence: float) -> bool:
-        """Determine if this is a new obstacle"""
-        if self.state == "AVOIDING":
-            return False
-            
-        if distance is None:
-            return False
-            
-        current_time = time.time()
-        for obstacle in self.obstacle_history:
-            if (not obstacle.cleared and 
-                current_time - obstacle.timestamp < self.obstacle_cooldown and
-                abs(obstacle.distance - distance) < self.min_obstacle_separation):
-                return False
-                
-        return True
-
-    def update(self, dt: float = 0.1):
-        if not self.enabled:
-            self._log_to_csv()
-            return
+    def _extract_waypoints(self):
+        """Extract waypoints from mission file for track calculation"""
+        if 'vehicle_config' in self.mission and 'initial_position' in self.mission['vehicle_config']:
+            initial = self.mission['vehicle_config']['initial_position']
+            if 'lat' in initial and 'lon' in initial:
+                try:
+                    self.waypoints.append({
+                        'lat': float(initial['lat']),
+                        'lon': float(initial['lon']),
+                        'local_x': 0.0,  # Will be set by first waypoint
+                        'local_y': 0.0,
+                        'type': 'start'
+                    })
+                except (ValueError, TypeError):
+                    pass
         
-        self._clean_obstacle_history()
-
-        if self.state == "NORMAL":
-            self._handle_normal_state()
-        elif self.state == "AVOIDING":
-            self._handle_avoiding_state(dt)
-        elif self.state == "CLEARING":
-            self._handle_clearing_state()
-
-        self._log_to_csv()
-
-    def _clean_obstacle_history(self):
-        """Remove old obstacles from history"""
-        current_time = time.time()
-        self.obstacle_history = [
-            obs for obs in self.obstacle_history 
-            if current_time - obs.timestamp < self.obstacle_cooldown * 2
-        ]
-
-    def _handle_normal_state(self):
-        """Check for new obstacles"""
-        if (self.sonar_distance is not None and 
-            self.sonar_distance < self.detection_threshold and
-            self.sonar_confidence is not None and
-            self.sonar_confidence >= self.confidence_threshold and
-            self._is_new_obstacle(self.sonar_distance, self.sonar_confidence)):
-            
-            self._enter_avoidance_mode()
-
-    def _can_use_depth_avoidance(self) -> tuple[bool, str]:
-        """
-        Check if depth avoidance is safe and allowed.
-        Returns (can_use, reason)
-        """
-        # Check if depth avoidance is even enabled
-        if not self.use_depth_as_last_resort:
-            return False, "Depth avoidance disabled (horizontal-only mode)"
-        
-        # Check vehicle system state
-        try:
-            current_state = self.vehicle_state.current_state
-            if current_state == SystemState.SURFACED_TRIM:
-                return False, "Vehicle in SURFACED_TRIM - cannot dive"
-        except:
-            pass
-        
-        # Check current depth
-        nav = self.vehicle_state.nav_state
-        current_depth = nav.get('depth', 0.0)
-        
-        # Too shallow to go up
-        if current_depth <= self.min_avoidance_depth:
-            return False, f"At minimum depth ({current_depth:.1f}m) - cannot go shallower"
-        
-        # Too deep to go down safely
-        if current_depth >= self.max_avoidance_depth:
-            return False, f"At maximum safe depth ({current_depth:.1f}m) - cannot go deeper"
-        
-        # Check if we have safe depth margins
-        if self.depth_direction == "UP":
-            target_depth = current_depth - self.depth_avoidance_offset
-            if target_depth < self.min_avoidance_depth:
-                return False, f"Going up would breach minimum depth"
-        elif self.depth_direction == "DOWN":
-            target_depth = current_depth + self.depth_avoidance_offset
-            if target_depth > self.max_avoidance_depth:
-                return False, f"Going down would breach maximum safe depth (no altitude sensor!)"
-        
-        return True, "Depth avoidance safe"
-
-    def _enter_avoidance_mode(self):
-        """Start avoiding a new obstacle"""
-        self.state = "AVOIDING"
-        self.avoidance_start_time = time.time()
-        self.total_avoidances += 1
-        self.current_avoidance_id += 1
-
-        # Create new obstacle event
-        self.current_obstacle = ObstacleEvent(
-            distance=self.sonar_distance,
-            confidence=self.sonar_confidence,
-            timestamp=self.sonar_timestamp
-        )
-        self.current_obstacle.avoidance_start_time = self.avoidance_start_time
-        self.obstacle_history.append(self.current_obstacle)
-
-        # Save complete mission context
-        self._save_mission_context()
-        
-        target = self.vehicle_state.target_state
-        nav = self.vehicle_state.nav_state
-
-        self.original_heading = target.get("target_heading", nav.get("heading", 0.0))
-        self.original_speed = target.get("target_speed", nav.get("speed", 0.0))
-        self.original_depth = target.get("target_depth", nav.get("depth", 0.0))
-
-        # Initialize commitment tracking
-        self.heading_at_turn_start = self.original_heading
-        self.current_turn_start_time = time.time()
-        self.turn_committed = False
-        self.time_approaching_obstacle = 0.0
-        self.last_distance_check = self.sonar_distance
-        self.maneuver_failure_count = 0
-        self.tried_depth_avoidance = False
-        self.using_depth_avoidance = False
-
-        # PRIMARY STRATEGY: Horizontal turning
-        self.turn_direction = "LEFT" if (self.total_avoidances % 2 == 1) else "RIGHT"
-
-        # SECONDARY STRATEGY: Depth (only if allowed and as last resort)
-        self.depth_direction = None
-        if self.use_depth_as_last_resort:
-            can_use_depth, reason = self._can_use_depth_avoidance()
-            if can_use_depth:
-                # Prefer going up (safer than diving blind)
-                if nav.get("depth", 0.0) > self.min_avoidance_depth + 2.0:
-                    self.depth_direction = "UP"
-                else:
-                    self.depth_direction = "DOWN"
-            else:
-                print(f"  Note: {reason}")
-
-        self.direction_reversals = 0
-
-        print("\n" + "=" * 70)
-        print(f"[OA #{self.current_avoidance_id}] OBSTACLE DETECTED at {self.sonar_distance:.1f}m")
-        print(f"    Confidence: {self.sonar_confidence:.1f}%")
-        print(f"    PRIMARY strategy: TURN {self.turn_direction}")
-        if self.depth_direction:
-            print(f"    SECONDARY strategy: DEPTH {self.depth_direction} (last resort)")
-        else:
-            print(f"    SECONDARY strategy: NONE (horizontal turning only)")
-        print("=" * 70 + "\n")
-
-    def _save_mission_context(self):
-        """Save the complete mission context for proper restoration"""
-        target = self.vehicle_state.target_state
-        self.original_mission_context = {
-            'target_heading': target.get("target_heading", 0.0),
-            'target_speed': target.get("target_speed", 0.0),
-            'target_depth': target.get("target_depth", 0.0),
-            'distance_to_waypoint': target.get("distance_to_waypoint", 0.0),
-            'mission_time': self.vehicle_state.mission_time
-        }
-
-    def _restore_mission_context(self):
-        """Restore the complete mission context after avoidance"""
-        if self.original_mission_context:
-            self.vehicle_state.update_target_state(
-                target_heading=self.original_mission_context['target_heading'],
-                target_speed=self.original_mission_context['target_speed'],
-                target_depth=self.original_mission_context['target_depth'],
-                distance_to_waypoint=self.original_mission_context['distance_to_waypoint']
-            )
-
-    def _handle_avoiding_state(self, dt: float):
-        """Execute avoidance maneuvers - SAFE strategy"""
-        current_time = time.time()
-        
-        # Check if maneuver is failing (still approaching obstacle)
-        if self.sonar_distance is not None and self.last_distance_check is not None:
-            if self.sonar_distance < self.last_distance_check:
-                self.time_approaching_obstacle += dt
-                
-                if self.time_approaching_obstacle >= self.maneuver_failing_threshold:
-                    print(f"  ⚠ WARNING: Still approaching after {self.time_approaching_obstacle:.1f}s!")
-                    print(f"    Distance: {self.last_distance_check:.1f}m → {self.sonar_distance:.1f}m")
-                    
-                    if self.maneuver_failure_count < self.max_maneuver_failures:
-                        self._switch_avoidance_strategy()
-                        self.time_approaching_obstacle = 0.0
-                        self.maneuver_failure_count += 1
-            else:
-                # Distance is increasing, maneuver is working
-                self.time_approaching_obstacle = 0.0
-            
-            self.last_distance_check = self.sonar_distance
-
-        # Check if we've committed to this turn direction
-        if not self.turn_committed:
-            time_turning = current_time - self.current_turn_start_time
-            nav = self.vehicle_state.nav_state
-            current_heading = nav.get("heading", self.heading_at_turn_start)
-            heading_change = abs(self._normalize_angle(current_heading - self.heading_at_turn_start))
-            
-            if (time_turning >= self.min_turn_commitment_time or 
-                heading_change >= self.min_heading_change_for_commit):
-                self.turn_committed = True
-                print(f"  ✓ Turn committed after {time_turning:.1f}s (Δheading: {heading_change:.1f}°)")
-
-        # Anti-flip-flop protection for turn reversals
-        time_since_reversal = current_time - self.last_reversal_time
-        time_in_current_direction = current_time - self.current_turn_start_time
-        
-        can_reverse = (
-            time_since_reversal >= self.min_reversal_interval and
-            time_in_current_direction >= self.min_turn_commitment_time and
-            self.turn_committed
-        )
-        
-        if (can_reverse and
-            self.prev_sonar_distance is not None and 
-            self.sonar_distance is not None and
-            self.prev_sonar_confidence is not None and 
-            self.sonar_confidence is not None and
-            self.prev_sonar_confidence >= self.confidence_threshold):
-            
-            range_change = self.sonar_distance - self.prev_sonar_distance
-            confidence_change = self.sonar_confidence - self.prev_sonar_confidence
-            
-            # Conservative reversal criteria
-            if range_change < -0.5 and confidence_change > 2.0:
-                self._reverse_turn_direction()
-                print(f"  ⟲ Turn reversal (Range Δ={range_change:.2f}m, Conf Δ={confidence_change:.1f}%)")
-
-        # EXECUTE MANEUVERS
-        target = self.vehicle_state.target_state
-        current_heading = target.get("target_heading", self.original_heading or 0.0)
-
-        # PRIMARY: Horizontal turn (always executed)
-        turn_increment = self.turn_rate * dt
-        if self.turn_direction == "LEFT":
-            new_heading = (current_heading + turn_increment) % 360.0
-        else:
-            new_heading = (current_heading - turn_increment) % 360.0
-        target["target_heading"] = new_heading
-
-        # SECONDARY: Depth change (only if safe and using it)
-        if self.using_depth_avoidance and self.depth_direction:
-            can_use, reason = self._can_use_depth_avoidance()
-            if can_use:
-                if self.depth_direction == "UP":
-                    new_depth = max(
-                        self.min_avoidance_depth,
-                        (self.original_depth or 0.0) - self.depth_avoidance_offset,
-                    )
-                else:
-                    new_depth = min(
-                        self.max_avoidance_depth,
-                        (self.original_depth or 0.0) + self.depth_avoidance_offset,
-                    )
-                target["target_depth"] = new_depth
-            else:
-                # Can no longer use depth, disable it
-                print(f"  Note: Disabling depth avoidance - {reason}")
-                self.using_depth_avoidance = False
-
-        # Speed reduction
-        if self.original_speed is not None:
-            target["target_speed"] = self.original_speed * self.speed_reduction_factor
-
-        # Check for clearance
-        obstacle_cleared = False
-        
-        if self.sonar_distance is None:
-            obstacle_cleared = True
-        elif self.sonar_distance >= self.max_range * 0.95:
-            obstacle_cleared = True
-        elif (self.sonar_confidence is not None and 
-              self.sonar_confidence < self.out_of_beam_confidence):
-            obstacle_cleared = True
-        elif (self.sonar_distance > self.clear_threshold and 
-              self.sonar_confidence is not None and
-              self.sonar_confidence >= self.confidence_threshold):
-            obstacle_cleared = True
-        
-        if obstacle_cleared:
-            self._enter_clearing_state()
-
-    def _normalize_angle(self, angle: float) -> float:
-        """Normalize angle to -180 to +180 range"""
-        while angle > 180:
-            angle -= 360
-        while angle < -180:
-            angle += 360
-        return angle
-
-    def _switch_avoidance_strategy(self):
-        """Switch avoidance strategy when current maneuver is failing"""
-        print(f"  🔄 Switching strategy (failure #{self.maneuver_failure_count + 1})")
-        
-        # First try: Reverse turn direction
-        if self.maneuver_failure_count == 0:
-            self._reverse_turn_direction()
-            print(f"    Strategy: Reverse turn to {self.turn_direction}")
-        
-        # Second try: Add depth avoidance (if safe)
-        elif self.maneuver_failure_count == 1 and not self.tried_depth_avoidance:
-            can_use, reason = self._can_use_depth_avoidance()
-            if can_use:
-                self.using_depth_avoidance = True
-                self.tried_depth_avoidance = True
-                print(f"    Strategy: Add DEPTH {self.depth_direction} to horizontal turn")
-            else:
-                print(f"    Strategy: Cannot use depth - {reason}")
-                # Just increase turn rate instead
-                self.turn_rate = min(self.turn_rate * 1.5, 30.0)
-                print(f"    Strategy: Increase turn rate to {self.turn_rate:.1f}°/s")
-        
-        # Third try: More aggressive turning
-        elif self.maneuver_failure_count == 2:
-            self.turn_rate = min(self.turn_rate * 1.5, 30.0)
-            print(f"    Strategy: Increase turn rate to {self.turn_rate:.1f}°/s")
-
-    def _reverse_turn_direction(self):
-        """Reverse turn direction with tracking"""
-        old = self.turn_direction
-        self.turn_direction = "RIGHT" if self.turn_direction == "LEFT" else "LEFT"
-        self.direction_reversals += 1
-        self.last_reversal_time = time.time()
-        self.current_turn_start_time = time.time()
-        self.turn_committed = False
-        
-        nav = self.vehicle_state.nav_state
-        self.heading_at_turn_start = nav.get("heading", self.heading_at_turn_start)
-
-    def _enter_clearing_state(self):
-        """Transition to clearing state"""
-        self.state = "CLEARING"
-        duration = time.time() - (self.avoidance_start_time or time.time())
-        self.total_avoidance_time += duration
-        
-        if self.current_obstacle:
-            self.current_obstacle.cleared = True
-            self.current_obstacle.avoidance_duration = duration
-
-        clearance_reason = "no sonar" if self.sonar_distance is None else f"{self.sonar_distance:.1f}m"
-        
-        print("\n" + "=" * 70)
-        print(f"[OA #{self.current_avoidance_id}] OBSTACLE CLEARED at {clearance_reason}")
-        print(f"    Duration: {duration:.1f}s")
-        print(f"    Reversals: {self.direction_reversals}")
-        print(f"    Used depth: {'YES' if self.using_depth_avoidance else 'NO'}")
-        print(f"    Failures: {self.maneuver_failure_count}")
-        print("=" * 70 + "\n")
-
-    def _handle_clearing_state(self):
-        """Restore mission parameters and reset"""
-        self._restore_mission_context()
-
-        # Full reset
-        self.state = "NORMAL"
-        self.turn_direction = None
-        self.depth_direction = None
-        self.original_heading = None
-        self.original_speed = None
-        self.original_depth = None
-        self.avoidance_start_time = None
-        self.current_obstacle = None
-        self.original_mission_context = None
-        self.direction_reversals = 0
-        self.turn_committed = False
-        self.heading_at_turn_start = None
-        self.current_turn_start_time = 0.0
-        self.time_approaching_obstacle = 0.0
-        self.last_distance_check = None
-        self.maneuver_failure_count = 0
-        self.tried_depth_avoidance = False
-        self.using_depth_avoidance = False
-
-        print(f"[OA] System reset - ready for next obstacle")
+        for task in self.mission.get('tasks', []):
+            task_type = task.get('type', '')
+            if task_type == 'SWIM_TO_WAYPOINT' and 'lat' in task and 'lon' in task:
+                try:
+                    self.waypoints.append({
+                        'lat': float(task['lat']),
+                        'lon': float(task['lon']),
+                        'local_x': task.get('local_x', 0.0),
+                        'local_y': task.get('local_y', 0.0),
+                        'type': 'waypoint'
+                    })
+                except (ValueError, TypeError):
+                    pass
+            elif task_type == 'FOLLOW_TRACK' and 'waypoints' in task:
+                for wp in task['waypoints']:
+                    try:
+                        self.waypoints.append({
+                            'lat': float(wp['lat']),
+                            'lon': float(wp['lon']),
+                            'local_x': wp.get('local_x', 0.0),
+                            'local_y': wp.get('local_y', 0.0),
+                            'type': 'track_waypoint'
+                        })
+                    except (ValueError, TypeError, KeyError):
+                        pass
 
     def _init_csv_logging(self):
+        if not (self.csv_logging_enabled and self.csv_output_enabled):
+            return
         try:
+            os.makedirs(self.log_directory, exist_ok=True)
             ts = time.strftime("%Y%m%d_%H%M%S")
-            fname = f"safe_obstacle_avoidance_log_{ts}.csv"
-            self.csv_file = open(fname, "w", newline="")
-            self.csv_writer = csv.writer(self.csv_file)
+            path = os.path.join(self.log_directory, f"obstacle_avoidance_log_{ts}.csv")
+            self.csv_file = open(path, "w", newline="")
+            self.csv_writer = csv.writer(self.csv_file, quoting=csv.QUOTE_MINIMAL)
             self.csv_writer.writerow([
-                "timestamp", "avoidance_id", "state", "obstacle_count",
-                "sonar_distance", "sonar_confidence", "vehicle_depth", 
-                "vehicle_heading", "vehicle_speed", "target_heading", 
-                "target_depth", "target_speed", "turn_direction", 
-                "depth_direction", "using_depth", "direction_reversals", 
-                "total_avoidances", "turn_committed", "time_approaching", 
-                "maneuver_failures"
+                "timestamp", "state", "sonar_distance", "sonar_confidence",
+                "veh_x", "veh_y", "veh_z", "veh_heading", "veh_speed",
+                "tgt_heading", "tgt_speed", "tgt_depth",
+                "carrot_x", "carrot_y", "carrot_z",
+                "dist_to_carrot", "cross_track_error", "maneuver",
+                "position_uncertainty", "adaptive_radius", "avoidance_id"
             ])
-            print(f"  Safe CSV logging: {fname}")
+            self.csv_file.flush()
+            print(f"[OA] CSV logging → {path}")
         except Exception as e:
-            print(f"  WARNING: CSV logging failed: {e}")
+            print(f"[OA] CSV init failed: {e}")
             self.csv_logging_enabled = False
 
-    def _log_to_csv(self):
-        if not self.csv_logging_enabled or not self.csv_writer:
+    def _log_to_csv(self, control: Dict[str, Any], distance: Optional[float], 
+                    confidence: Optional[float], position_uncertainty: float, 
+                    adaptive_radius: float, cross_track_error: float):
+        if not self.csv_logging_enabled:
             return
         try:
             nav = self.vehicle_state.nav_state
-            tgt = self.vehicle_state.target_state
+            vx = nav.get("local_x", 0.0)
+            vy = nav.get("local_y", 0.0)
+            vz = nav.get("depth", 0.0)
+
+            carrot_x = self.carrot_waypoint[0] if self.carrot_waypoint else ""
+            carrot_y = self.carrot_waypoint[1] if self.carrot_waypoint else ""
+            carrot_z = self.carrot_waypoint[2] if self.carrot_waypoint else ""
+            
+            dist_to_carrot = ""
+            if self.carrot_waypoint:
+                dx = self.carrot_waypoint[0] - vx
+                dy = self.carrot_waypoint[1] - vy
+                dz = self.carrot_waypoint[2] - vz
+                dist_to_carrot = f"{math.sqrt(dx*dx + dy*dy + dz*dz):.1f}"
+
             self.csv_writer.writerow([
-                time.time(),
-                self.current_avoidance_id,
-                self.state,
-                len([o for o in self.obstacle_history if not o.cleared]),
-                ("" if self.sonar_distance is None else f"{self.sonar_distance:.2f}"),
-                ("" if self.sonar_confidence is None else f"{self.sonar_confidence:.2f}"),
-                f"{nav.get('depth', 0.0):.2f}",
+                f"{time.time():.3f}", self.state,
+                ("" if distance is None else f"{distance:.2f}"),
+                ("" if confidence is None else f"{confidence:.2f}"),
+                f"{vx:.1f}", f"{vy:.1f}", f"{vz:.1f}",
                 f"{nav.get('heading', 0.0):.1f}",
                 f"{nav.get('speed', 0.0):.2f}",
-                f"{tgt.get('target_heading', 0.0):.1f}",
-                f"{tgt.get('target_depth', 0.0):.2f}",
-                f"{tgt.get('target_speed', 0.0):.2f}",
-                (self.turn_direction or ""),
-                (self.depth_direction or ""),
-                ("Y" if self.using_depth_avoidance else "N"),
-                self.direction_reversals,
-                self.total_avoidances,
-                ("Y" if self.turn_committed else "N"),
-                f"{self.time_approaching_obstacle:.2f}",
-                self.maneuver_failure_count
+                f"{control.get('target_heading', 0.0):.1f}",
+                f"{control.get('target_speed', 0.0):.2f}",
+                f"{control.get('target_depth', 0.0):.1f}",
+                carrot_x, carrot_y, carrot_z, dist_to_carrot,
+                f"{cross_track_error:.1f}",
+                self.selected_maneuver if self.selected_maneuver else "",
+                f"{position_uncertainty:.1f}",
+                f"{adaptive_radius:.1f}",
+                self.avoidance_id
             ])
-            self.log_counter += 1
-            if self.log_counter % 10 == 0:
-                self.csv_file.flush()
+            self.csv_file.flush()
         except Exception as e:
-            if self.log_counter % 100 == 0:
-                print(f"CSV logging error: {e}")
+            print(f"[OA] CSV log error: {e}")
 
-    def get_status(self) -> Dict[str, Any]:
-        """Get current avoidance system status"""
-        return {
-            'state': self.state,
-            'enabled': self.enabled,
-            'current_obstacle_distance': self.sonar_distance,
-            'current_obstacle_confidence': self.sonar_confidence,
-            'total_avoidances': self.total_avoidances,
-            'active_obstacles': len([o for o in self.obstacle_history if not o.cleared]),
-            'turn_direction': self.turn_direction,
-            'using_depth': self.using_depth_avoidance,
-            'avoidance_id': self.current_avoidance_id
+    def _calculate_adaptive_waypoint_radius(self) -> float:
+        """Calculate adaptive waypoint radius based on position uncertainty"""
+        if not self.use_adaptive_radius:
+            return self.fixed_waypoint_radius
+        
+        try:
+            nav = self.vehicle_state.nav_state
+            position_uncertainty = nav.get('position_uncertainty', 10.0)
+            
+            uncertainty_component = position_uncertainty * self.uncertainty_scale_factor
+            adaptive_radius = self.base_waypoint_radius + uncertainty_component
+            adaptive_radius = max(self.base_waypoint_radius, min(adaptive_radius, self.max_waypoint_radius))
+            
+            return adaptive_radius
+            
+        except Exception as e:
+            print(f"[OA] Warning: Error calculating adaptive radius: {e}")
+            return self.base_waypoint_radius
+
+    def _get_current_track_segment(self, vx: float, vy: float) -> Optional[Tuple[Dict, Dict, int]]:
+        """
+        Find the current track segment the vehicle is on or closest to.
+        Returns: (waypoint1, waypoint2, segment_index) or None
+        """
+        if len(self.waypoints) < 2:
+            return None
+        
+        min_dist = float('inf')
+        closest_segment = None
+        closest_idx = 0
+        
+        for i in range(len(self.waypoints) - 1):
+            wp1 = self.waypoints[i]
+            wp2 = self.waypoints[i + 1]
+            
+            # Calculate distance from vehicle to track segment
+            x1, y1 = wp1['local_x'], wp1['local_y']
+            x2, y2 = wp2['local_x'], wp2['local_y']
+            
+            # Point-to-line distance
+            num = abs((y2 - y1) * vx - (x2 - x1) * vy + x2 * y1 - y2 * x1)
+            den = math.sqrt((y2 - y1)**2 + (x2 - x1)**2)
+            
+            if den > 0:
+                dist = num / den
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_segment = (wp1, wp2, i)
+                    closest_idx = i
+        
+        return closest_segment
+
+    def _calculate_cross_track_error(self, vx: float, vy: float) -> float:
+        """
+        Calculate cross-track error: perpendicular distance from vehicle to track.
+        Returns signed distance (positive = right of track, negative = left of track)
+        """
+        segment = self._get_current_track_segment(vx, vy)
+        if not segment:
+            return 0.0
+        
+        wp1, wp2, _ = segment
+        x1, y1 = wp1['local_x'], wp1['local_y']
+        x2, y2 = wp2['local_x'], wp2['local_y']
+        
+        # Calculate signed cross-track error
+        # Positive = right of track, negative = left
+        track_dx = x2 - x1
+        track_dy = y2 - y1
+        
+        to_vehicle_dx = vx - x1
+        to_vehicle_dy = vy - y1
+        
+        # Cross product gives signed distance
+        cross = track_dx * to_vehicle_dy - track_dy * to_vehicle_dx
+        track_length = math.sqrt(track_dx**2 + track_dy**2)
+        
+        if track_length > 0:
+            return cross / track_length
+        return 0.0
+
+    def _evaluate_maneuver_options(self, vx: float, vy: float, vz: float, heading: float, 
+                                   detected_range: float) -> List[Dict[str, Any]]:
+        """
+        Evaluate all possible avoidance maneuvers and their resulting cross-track errors.
+        Returns list of maneuver options with scores.
+        
+        MISSION-AGNOSTIC: Uses only current vehicle state, detected range, and mission track
+        """
+        options = []
+        
+        # Calculate forward distance for carrot
+        if self.use_fixed_carrot_distance:
+            forward_dist = self.carrot_distance
+        else:
+            forward_dist = detected_range * self.range_multiplier
+        
+        # Forward direction vector
+        theta = math.radians(90.0 - heading)
+        forward_x = math.cos(theta)
+        forward_y = math.sin(theta)
+        
+        # Perpendicular vectors (left/right)
+        left_x = math.sin(theta)
+        left_y = -math.cos(theta)
+        right_x = -left_x
+        right_y = -left_y
+        
+        # Option 1: LEFT maneuver
+        carrot_left_x = vx + forward_x * forward_dist + left_x * self.lateral_offset
+        carrot_left_y = vy + forward_y * forward_dist + left_y * self.lateral_offset
+        cte_left = abs(self._calculate_cross_track_error(carrot_left_x, carrot_left_y))
+        
+        options.append({
+            'maneuver': 'LEFT',
+            'carrot': (carrot_left_x, carrot_left_y, vz),
+            'cross_track_error': cte_left,
+            'feasible': True,
+            'score': cte_left * self.cross_track_weight
+        })
+        
+        # Option 2: RIGHT maneuver
+        carrot_right_x = vx + forward_x * forward_dist + right_x * self.lateral_offset
+        carrot_right_y = vy + forward_y * forward_dist + right_y * self.lateral_offset
+        cte_right = abs(self._calculate_cross_track_error(carrot_right_x, carrot_right_y))
+        
+        options.append({
+            'maneuver': 'RIGHT',
+            'carrot': (carrot_right_x, carrot_right_y, vz),
+            'cross_track_error': cte_right,
+            'feasible': True,
+            'score': cte_right * self.cross_track_weight
+        })
+        
+        if self.enable_depth_avoidance:
+            # Option 3: DIVE maneuver (stay on track horizontally, go deeper)
+            carrot_dive_x = vx + forward_x * forward_dist
+            carrot_dive_y = vy + forward_y * forward_dist
+            target_dive_depth = vz + self.vertical_clearance_margin + detected_range * 0.3
+            
+            # Check if dive is feasible
+            dive_feasible = target_dive_depth <= self.max_operating_depth
+            cte_dive = abs(self._calculate_cross_track_error(carrot_dive_x, carrot_dive_y))
+            
+            options.append({
+                'maneuver': 'DIVE',
+                'carrot': (carrot_dive_x, carrot_dive_y, target_dive_depth),
+                'cross_track_error': cte_dive,
+                'feasible': dive_feasible,
+                'score': cte_dive * self.cross_track_weight if dive_feasible else float('inf')
+            })
+            
+            # Option 4: CLIMB maneuver (stay on track horizontally, go shallower)
+            carrot_climb_x = vx + forward_x * forward_dist
+            carrot_climb_y = vy + forward_y * forward_dist
+            target_climb_depth = max(self.min_operating_depth, vz - self.vertical_clearance_margin)
+            
+            # Check if climb is feasible
+            climb_feasible = target_climb_depth >= self.min_operating_depth
+            cte_climb = abs(self._calculate_cross_track_error(carrot_climb_x, carrot_climb_y))
+            
+            options.append({
+                'maneuver': 'CLIMB',
+                'carrot': (carrot_climb_x, carrot_climb_y, target_climb_depth),
+                'cross_track_error': cte_climb,
+                'feasible': climb_feasible,
+                'score': cte_climb * self.cross_track_weight if climb_feasible else float('inf')
+            })
+        
+        return options
+
+    def _select_best_maneuver(self, options: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Select the maneuver with the lowest cross-track error that is feasible"""
+        feasible_options = [opt for opt in options if opt['feasible']]
+        
+        if not feasible_options:
+            # If no feasible options, default to RIGHT
+            print("[OA] WARNING: No feasible maneuvers, defaulting to RIGHT")
+            return next(opt for opt in options if opt['maneuver'] == 'RIGHT')
+        
+        # Select option with minimum score (lowest cross-track error)
+        best_option = min(feasible_options, key=lambda x: x['score'])
+        return best_option
+
+    def update_sonar(self, sonar_pkt: Optional[dict] = None):
+        """Record latest sonar reading."""
+        pass
+
+    def _calculate_heading_to(self, vx: float, vy: float, wx: float, wy: float) -> float:
+        """Calculate heading to waypoint."""
+        dx = wx - vx
+        dy = wy - vy
+        math_bearing = math.degrees(math.atan2(dy, dx)) % 360.0
+        nautical_bearing = (90.0 - math_bearing) % 360.0
+        return nautical_bearing
+
+    def update(self, dt: float, sonar_distance: Optional[float] = None, 
+              sonar_confidence: Optional[float] = None) -> Dict[str, Any]:
+        """Main update - detect, evaluate, select maneuver, navigate to 3D carrot"""
+        nav = self.vehicle_state.nav_state
+        vx = nav.get("local_x", 0.0)
+        vy = nav.get("local_y", 0.0)
+        vz = nav.get("depth", 0.0)
+        heading = nav.get("heading", 0.0)
+        position_uncertainty = nav.get("position_uncertainty", 10.0)
+
+        # Calculate cross-track error
+        cross_track_error = self._calculate_cross_track_error(vx, vy)
+
+        control = {
+            "active": False,
+            "state": self.state,
+            "target_heading": heading,
+            "target_speed": self.normal_speed,
+            "target_depth": vz,
+            "target_lat": None,
+            "target_lon": None,
+            "avoidance_id": self.avoidance_id,
         }
 
-    def reset_system(self):
-        """Force reset the entire avoidance system"""
-        print("[OA] Manual system reset")
-        self.state = "NORMAL"
-        self.current_obstacle = None
-        self.obstacle_history.clear()
-        self.turn_direction = None
-        self.depth_direction = None
-        self.original_heading = None
-        self.original_speed = None
-        self.original_depth = None
-        self.avoidance_start_time = None
-        self.original_mission_context = None
-        self.direction_reversals = 0
-        self.turn_committed = False
-        self.heading_at_turn_start = None
-        self.current_turn_start_time = 0.0
-        self.time_approaching_obstacle = 0.0
-        self.last_distance_check = None
-        self.maneuver_failure_count = 0
-        self.tried_depth_avoidance = False
-        self.using_depth_avoidance = False
-        self._restore_mission_context()
+        # Calculate current adaptive waypoint radius
+        current_waypoint_radius = self._calculate_adaptive_waypoint_radius()
 
-    def enable(self):
-        if not self.enabled:
-            self.enabled = True
-            print("Obstacle avoidance ENABLED")
-    
-    def disable(self):
-        if self.enabled:
-            self.enabled = False
-            if self.state != 'NORMAL':
-                self._handle_clearing_state()
-            print("Obstacle avoidance DISABLED")
-    
-    def close(self):
-        if self.csv_file is not None:
+        # NORMAL: check for detection
+        if self.state == "NORMAL":
+            if (sonar_distance is not None and sonar_confidence is not None and
+                sonar_distance < self.activation_distance and 
+                sonar_confidence > self.activation_confidence):
+                
+                # Store nominal depth to return to
+                self.nominal_depth = vz
+                
+                # DETECT → Evaluate all maneuver options
+                options = self._evaluate_maneuver_options(vx, vy, vz, heading, sonar_distance)
+                
+                # Select best maneuver (minimum cross-track error)
+                best_option = self._select_best_maneuver(options)
+                
+                self.carrot_waypoint = best_option['carrot']
+                self.selected_maneuver = best_option['maneuver']
+                self.state = "AVOIDING"
+                
+                if self.debug_output:
+                    cx, cy, cz = self.carrot_waypoint
+                    dist_2d = math.hypot(cx - vx, cy - vy)
+                    dist_3d = math.sqrt((cx - vx)**2 + (cy - vy)**2 + (cz - vz)**2)
+                    hdg_to_carrot = self._calculate_heading_to(vx, vy, cx, cy)
+                    
+                    print(f"\n{'='*70}")
+                    print(f"[OA] DETECTION @ {sonar_distance:.1f}m → AVOIDING (ID {self.avoidance_id})")
+                    print(f"  Vehicle Position: ({vx:.1f}, {vy:.1f}, {vz:.1f}m)")
+                    print(f"  Vehicle Heading:  {heading:.1f}°")
+                    print(f"  Cross-Track Error: {cross_track_error:+.1f}m")
+                    print(f"\n  Evaluated {len(options)} maneuver options:")
+                    for opt in sorted(options, key=lambda x: x['score']):
+                        status = "SELECTED" if opt['maneuver'] == self.selected_maneuver else ""
+                        feasible = "✓" if opt['feasible'] else "✗"
+                        print(f"    {opt['maneuver']:8s} {feasible} CTE: {opt['cross_track_error']:6.1f}m  Score: {opt['score']:6.1f}  {status}")
+                    
+                    print(f"\n  SELECTED: {self.selected_maneuver}")
+                    print(f"  Carrot Position:   ({cx:.1f}, {cy:.1f}, {cz:.1f}m)")
+                    print(f"  Heading to Carrot: {hdg_to_carrot:.1f}°")
+                    print(f"  Distance (2D):     {dist_2d:.1f}m")
+                    print(f"  Distance (3D):     {dist_3d:.1f}m")
+                    print(f"  Waypoint Radius:   {current_waypoint_radius:.1f}m (adaptive)")
+                    print(f"{'='*70}\n")
+
+        # AVOIDING: navigate to 3D carrot
+        elif self.state == "AVOIDING":
+            control["active"] = True
+            control["target_speed"] = self.avoidance_speed
+            
+            if self.carrot_waypoint:
+                cx, cy, cz = self.carrot_waypoint
+                
+                # Steer toward carrot (horizontal)
+                hdg_to_carrot = self._calculate_heading_to(vx, vy, cx, cy)
+                control["target_heading"] = hdg_to_carrot
+                
+                # Command depth
+                control["target_depth"] = cz
+                
+                # Check if reached (3D distance)
+                dx = cx - vx
+                dy = cy - vy
+                dz = cz - vz
+                dist_horizontal = math.hypot(dx, dy)
+                dist_3d = math.sqrt(dx*dx + dy*dy + dz*dz)
+                
+                # Debug output every 2 seconds
+                if self.debug_output and int(time.time() * 10) % 20 == 0:
+                    print(f"[OA] AVOIDING ({self.selected_maneuver}):")
+                    print(f"  Vehicle: ({vx:.1f}, {vy:.1f}, {vz:.1f}m) @ {heading:.1f}°")
+                    print(f"  Carrot:  ({cx:.1f}, {cy:.1f}, {cz:.1f}m)")
+                    print(f"  Distance (horiz): {dist_horizontal:.1f}m | Depth error: {abs(dz):.1f}m")
+                    print(f"  Cross-track error: {cross_track_error:+.1f}m")
+                    print(f"  Adaptive radius: {current_waypoint_radius:.1f}m")
+                
+                # Check if carrot reached (horizontal within radius AND depth within tolerance)
+                if dist_horizontal < current_waypoint_radius and abs(dz) < self.depth_tolerance:
+                    if self.debug_output:
+                        print(f"\n{'='*70}")
+                        print(f"[OA] CARROT REACHED → NORMAL (ID {self.avoidance_id} complete)")
+                        print(f"  Maneuver: {self.selected_maneuver}")
+                        print(f"  Final Position: ({vx:.1f}, {vy:.1f}, {vz:.1f}m)")
+                        print(f"  Distance from carrot: {dist_3d:.1f}m")
+                        print(f"  Final cross-track error: {cross_track_error:+.1f}m")
+                        print(f"{'='*70}\n")
+                    
+                    self.state = "NORMAL"
+                    self.carrot_waypoint = None
+                    self.selected_maneuver = None
+                    self.avoidance_id += 1
+
+        control["state"] = self.state
+        self._log_to_csv(control, sonar_distance, sonar_confidence, 
+                        position_uncertainty, current_waypoint_radius, cross_track_error)
+        return control
+
+    def shutdown(self):
+        if self.csv_file:
             try:
+                self.csv_file.flush()
                 self.csv_file.close()
-                print("Obstacle avoidance CSV log closed")
-            except Exception as e:
-                print(f"Error closing CSV log: {e}")
-    
-    def __del__(self):
-        self.close()
-
-
-if __name__ == '__main__':
-    print("SAFE ObstacleAvoidance module")
-    print("\nSafety features:")
-    print("  1. ✓ Respects SURFACED_TRIM state (no diving from surface)")
-    print("  2. ✓ Checks depth limits before vertical maneuvers")
-    print("  3. ✓ No blind diving (no altitude sensor = dangerous)")
-    print("  4. ✓ Horizontal turning is PRIMARY strategy")
-    print("  5. ✓ Depth changes only as LAST RESORT")
-    print("  6. ✓ Earlier detection (50m)")
-    print("  7. ✓ No flip-flopping (3s minimum between reversals)")
-    print("  8. ✓ Committed turn execution (5s minimum)")
+            except Exception:
+                pass
+        print("[OA] Shutdown complete")
