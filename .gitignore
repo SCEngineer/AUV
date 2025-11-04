@@ -9,3 +9,4 @@ logs/*.csv
 venv/
 .env
 *.tmp
+venv/
