@@ -239,9 +239,17 @@ class EnhancedHAL:
                     self._log(f"[HAL] Auto-detected initialization with valid coordinates: ({lat:.6f}, {lon:.6f})")
                     self.mark_initialized(True)
 
-            # Handle comms (only if telemetry is activated)
+            # ALWAYS process incoming commands (even before telemetry is active)
+            # This allows mission upload and start commands to be received
+            self.network_mgr.handle_depth_based_connection()
+            if self.network_mgr.connected_to_gcs:
+                self.network_mgr.process_incoming_messages(self.command_handler.handle_incoming_message)
+            
+            # Send telemetry and keepalives (only if telemetry is activated)
             if self._telemetry_activated:
-                self._handle_communication()
+                self.telemetry_mgr.process_telemetry_messages(self.network_mgr)
+                if self.network_mgr.wifi_enabled and self.network_mgr.connected_to_gcs:
+                    self.network_mgr.send_keepalive(self.vehicle_id)
 
         except Exception as e:
             print(f"HAL: Update error: {e}")

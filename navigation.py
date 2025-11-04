@@ -24,9 +24,9 @@ class Navigation:
         # Magnetic declination correction (East is positive)
         self.magnetic_declination_deg = declination_deg
 
-        # Internal navigation estimates - start uninitialized
-        self.lat = 0.0
-        self.lon = 0.0
+        # Internal navigation estimates - initialize with origin if provided
+        self.lat = origin_lat if origin_lat is not None else 0.0
+        self.lon = origin_lon if origin_lon is not None else 0.0
         self.depth = 0.0
         self.heading = 0.0
         self.speed = 0.0

@@ -61,7 +61,7 @@ class CommandHandler:
     def _handle_mission_upload(self, payload: Dict[str, Any], timestamp: float):
         """Handle mission upload from GCS"""
         try:
-            mission_name = payload.get('name', 'uploaded_mission')
+            mission_name = payload.get('name', payload.get('mission_name', 'uploaded_mission'))
             mission_data = payload.get('mission', {})
             
             if not mission_data:

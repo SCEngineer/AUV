@@ -167,7 +167,7 @@ class SimulatedSonar:
             (distance, {"confidence": 0-100, "obstacle_id": str, "bearing": float})
         """
         if not self.obstacles:
-            return self.max_range, {"confidence": 0.0}
+            return self.max_range, 0.0
 
         # Extract vehicle position
         veh_x = vehicle_position.get('x', vehicle_position.get('local_x', 0.0))
